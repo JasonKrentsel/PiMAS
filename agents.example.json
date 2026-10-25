@@ -1,0 +1,28 @@
+{
+  "roles": {
+    "orchestrator": {
+      "provider": "pimas",
+      "model": "local-model",
+      "thinkingLevel": "off",
+      "systemPrompt": "prompts/orchestrator.md"
+    },
+    "planner": {
+      "provider": "pimas",
+      "model": "local-model",
+      "thinkingLevel": "off",
+      "systemPrompt": "prompts/planner.md"
+    },
+    "executor": {
+      "provider": "pimas",
+      "model": "local-model",
+      "thinkingLevel": "off",
+      "systemPrompt": "prompts/executor.md"
+    },
+    "reviewer": {
+      "provider": "pimas",
+      "model": "local-model",
+      "thinkingLevel": "off",
+      "systemPrompt": "prompts/reviewer.md"
+    }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "pimas": {
+      "name": "PiMAS OpenAI-compatible endpoint",
+      "baseUrl": "http://127.0.0.1:1234/v1",
+      "api": "openai-completions",
+      "apiKey": "local",
+      "authHeader": true,
+      "models": [
+        {
+          "id": "local-model",
+          "name": "local-model",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 128000,
+          "maxTokens": 4096,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "compat": {
+            "supportsStore": false,
+            "supportsDeveloperRole": false,
+            "supportsReasoningEffort": false,
+            "supportsUsageInStreaming": false,
+            "maxTokensField": "max_tokens"
+          }
+        }
+      ]
+    }
+  }
+}

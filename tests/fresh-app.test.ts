@@ -7,9 +7,11 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { createOrchestratorSession } from "../src/agent.js";
+import { loadAgentConfig } from "../src/agent-config.js";
 
 interface ChatRequest {
   model: string;
+  reasoning_effort?: string;
   messages: { role: string; content: unknown }[];
   tools: { function: { name: string } }[];
 }
@@ -17,7 +19,7 @@ interface ChatRequest {
 type Reply =
   | { text: string }
   | { tool: string; args: Record<string, unknown> }
-  | { error: string }
+  | { error: string; status?: number }
   | { hang: true };
 
 /** Exercise the real SDK/HTTP path, but never contact a real model. */
@@ -40,7 +42,7 @@ async function fixture(t: TestContext, respond: (request: ChatRequest, count: nu
       requests.push(body);
       const reply = respond(body, requests.length);
       if ("error" in reply) {
-        response.writeHead(503, { "content-type": "application/json" });
+        response.writeHead(reply.status ?? 503, { "content-type": "application/json" });
         response.end(JSON.stringify({ error: { message: reply.error } }));
       } else if ("hang" in reply) {
         response.writeHead(200, { "content-type": "text/event-stream" });
@@ -71,14 +73,34 @@ async function fixture(t: TestContext, respond: (request: ChatRequest, count: nu
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+  const modelsFile = path.join(cwd, "models.local.json");
+  const config = JSON.parse(await readFile(new URL("../models.example.json", import.meta.url), "utf8"));
+  config.providers.pimas.baseUrl = baseUrl;
+  config.providers.pimas.apiKey = "test-secret";
+  config.providers.pimas.models[0].id = "scripted-model";
+  config.providers["fixture-provider"] = config.providers.pimas;
+  delete config.providers.pimas;
+  await writeFile(modelsFile, JSON.stringify(config));
+  const agentsFile = path.join(cwd, "agents.local.json");
+  const agentConfig = await loadAgentConfig(path.resolve("agents.example.json"));
+  for (const profile of Object.values(agentConfig.roles)) {
+    profile.provider = "fixture-provider";
+    profile.model = "scripted-model";
+  }
+  await writeFile(agentsFile, JSON.stringify(agentConfig));
+  const cliFlags = ["--models", modelsFile, "--agents", agentsFile];
 
   return {
     cwd,
+    modelsFile,
+    agentsFile,
+    cliFlags,
     requests,
     receivedRequest,
     async session(manager = SessionManager.create(cwd, path.join(cwd, "sessions"))) {
+      const { roles } = await loadAgentConfig(agentsFile);
       const session = await createOrchestratorSession({
-        cwd, baseUrl, modelId: "scripted-model", apiKey: "test-secret", sessionManager: manager,
+        cwd, modelsFile, profile: roles.orchestrator, sessionManager: manager,
       });
       sessions.add(session);
       return session;
@@ -94,9 +116,7 @@ async function fixture(t: TestContext, respond: (request: ChatRequest, count: nu
           ...process.env,
           TSX_DISABLE_CACHE: "1",
           PIMAS_CWD: cwd,
-          PIMAS_BASE_URL: baseUrl,
-          PIMAS_MODEL: "scripted-model",
-          OPENAI_API_KEY: "test-secret",
+          PIMAS_MODEL: "must-not-be-selected",
         },
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -148,6 +168,76 @@ test("fresh CLI prints usage without contacting a model or creating run storage"
   await assert.rejects(access(path.join(app.cwd, "data", "runs")), { code: "ENOENT" });
 });
 
+test("CLI requires an explicit models path instead of discovering a file", TIMEOUT, async (t) => {
+  const app = await fixture(t, () => { throw new Error("Missing configuration must not call the model"); });
+  const result = await app.cli("Inspect the project");
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, /Provide --models <file>/);
+  assert.equal(app.requests.length, 0);
+});
+
+test("CLI also requires an explicit agents file", TIMEOUT, async (t) => {
+  const app = await fixture(t, () => { throw new Error("Missing roles must not call the model"); });
+  const result = await app.cli("--models", app.modelsFile, "Inspect");
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, /Provide --agents <file>/);
+  assert.equal(app.requests.length, 0);
+});
+
+test("role configuration selects the provider, thinking level, and custom Markdown prompt", TIMEOUT, async (t) => {
+  const app = await fixture(t, (request) => {
+    assert.equal(request.model, "scripted-model");
+    assert.equal(request.reasoning_effort, "high");
+    assert.match(JSON.stringify(request.messages), /CUSTOM_ROLE_PROMPT/);
+    assert.deepEqual(request.tools.map((tool) => tool.function.name).sort(), ["find", "grep", "ls", "read"]);
+    return { text: "Used the configured profile." };
+  });
+  const models = JSON.parse(await readFile(app.modelsFile, "utf8"));
+  models.providers["fixture-provider"].models[0].reasoning = true;
+  models.providers["fixture-provider"].models[0].compat.supportsReasoningEffort = true;
+  await writeFile(app.modelsFile, JSON.stringify(models));
+  const agents = JSON.parse(await readFile(app.agentsFile, "utf8"));
+  agents.roles.orchestrator.thinkingLevel = "high";
+  agents.roles.orchestrator.systemPrompt = "custom.md";
+  await writeFile(path.join(app.cwd, "custom.md"), "CUSTOM_ROLE_PROMPT: Inspect without modifying files.");
+  await writeFile(app.agentsFile, JSON.stringify(agents));
+  const result = await app.cli(...app.cliFlags, "Inspect");
+  assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /Model: fixture-provider\/scripted-model · thinking: high/);
+  assert.doesNotMatch(result.stderr, /Warning: requested thinking/);
+  assert.equal(app.requests.length, 1);
+});
+
+test("CLI reports when model capabilities clamp the requested thinking level", TIMEOUT, async (t) => {
+  const app = await fixture(t, () => ({ text: "Thinking is unavailable on this model." }));
+  const agents = JSON.parse(await readFile(app.agentsFile, "utf8"));
+  agents.roles.orchestrator.thinkingLevel = "high";
+  await writeFile(app.agentsFile, JSON.stringify(agents));
+  const result = await app.cli(...app.cliFlags, "Inspect");
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /Warning: requested thinking level high was limited to off/);
+  assert.equal(app.requests.length, 1);
+});
+
+test("missing or invalid model files fail without exposing config values", TIMEOUT, async (t) => {
+  const app = await fixture(t, () => { throw new Error("Invalid configuration must not call the model"); });
+  const missing = await app.cli("--agents", app.agentsFile, "--models", path.join(app.cwd, "missing.json"), "Inspect");
+  assert.equal(missing.code, 1, missing.stderr);
+  assert.match(missing.stderr, /ENOENT/);
+
+  await writeFile(app.modelsFile, '{"providers": {"pimas": {"apiKey": "SENSITIVE_VALUE_DO_NOT_PRINT"');
+  const malformed = await app.cli(...app.cliFlags, "Inspect");
+  assert.equal(malformed.code, 1, malformed.stderr);
+  assert.match(malformed.stderr, /Invalid models configuration/);
+  assert.doesNotMatch(malformed.stderr + malformed.stdout, /SENSITIVE_VALUE_DO_NOT_PRINT/);
+
+  await writeFile(app.modelsFile, JSON.stringify({ providers: { pimas: { apiKey: 123 } } }));
+  const invalidSchema = await app.cli(...app.cliFlags, "Inspect");
+  assert.equal(invalidSchema.code, 1, invalidSchema.stderr);
+  assert.match(invalidSchema.stderr, /Invalid models configuration/);
+  assert.equal(app.requests.length, 0);
+});
+
 test("fresh CLI reads a project file with only read tools and persists its conversation", TIMEOUT, async (t) => {
   const app = await fixture(t, (request, count) => {
     assert.equal(request.model, "scripted-model");
@@ -164,7 +254,7 @@ test("fresh CLI reads a project file with only read tools and persists its conve
   await writeFile(path.join(app.cwd, ".pi", "APPEND_SYSTEM.md"), "AMBIENT_INSTRUCTIONS");
   await writeFile(path.join(app.cwd, "AGENTS.md"), "AMBIENT_INSTRUCTIONS");
 
-  const result = await app.cli("Read notes.txt and explain the interface");
+  const result = await app.cli(...app.cliFlags, "Read notes.txt and explain the interface");
   assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /Orchestrator > The project specifies GET \/api\/items/);
   assert.match(result.stderr, /delegation and run resume are not implemented/);
@@ -202,10 +292,11 @@ test("independent Pi histories can be closed, reopened, and continued", TIMEOUT,
   const second = await app.session();
   assert.notEqual(first.sessionFile, second.sessionFile);
   assert.deepEqual(first.getActiveToolNames().sort(), ["find", "grep", "ls", "read"]);
-  assert.match(first.systemPrompt, /cannot edit files, run commands, or delegate yet/);
+  const prompt = (await readFile(new URL("../prompts/orchestrator.md", import.meta.url), "utf8")).trim();
+  assert.ok(first.systemPrompt.includes(prompt), "The application Markdown file must supply the system prompt");
   assert.equal(first.settingsManager.getRetryEnabled(), false);
-  assert.equal(first.settingsManager.getProviderRetrySettings().maxRetries, 0);
-  assert.equal(first.settingsManager.getCompactionEnabled(), false);
+  assert.equal(first.settingsManager.getProviderRetrySettings().maxRetries, 100);
+  assert.equal(first.settingsManager.getCompactionEnabled(), true);
   assert.equal(first.settingsManager.getCacheWarmingMode(), "off");
 
   await first.prompt("My word is alpha");
@@ -221,18 +312,28 @@ test("independent Pi histories can be closed, reopened, and continued", TIMEOUT,
   assert.doesNotMatch(saved, /test-secret/);
 });
 
-test("provider errors produce a failing CLI exit and are not retried", TIMEOUT, async (t) => {
-  const app = await fixture(t, () => ({ error: "Scripted provider unavailable" }));
-  const result = await app.cli("Inspect the project");
+test("a transient provider failure is retried successfully", TIMEOUT, async (t) => {
+  const app = await fixture(t, (_request, count) => count === 1
+    ? { error: "Scripted provider unavailable", status: 503 }
+    : { text: "Recovered after a transient error." });
+  const result = await app.cli(...app.cliFlags, "Inspect the project");
+  assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /Recovered after a transient error/);
+  assert.equal(app.requests.length, 2);
+});
+
+test("non-retryable provider errors produce a failing CLI exit", TIMEOUT, async (t) => {
+  const app = await fixture(t, () => ({ error: "Scripted authentication rejected", status: 401 }));
+  const result = await app.cli(...app.cliFlags, "Inspect the project");
   assert.equal(result.code, 1, `${result.stdout}\n${result.stderr}`);
-  assert.match(result.stderr, /PiMAS error:.*Scripted provider unavailable/);
+  assert.match(result.stderr, /PiMAS error:.*Scripted authentication rejected/);
   assert.doesNotMatch(result.stdout, /Orchestrator >/);
   assert.equal(app.requests.length, 1);
 });
 
 test("empty final answers are failures rather than apparent success", TIMEOUT, async (t) => {
   const app = await fixture(t, () => ({ text: "" }));
-  const result = await app.cli("Inspect the project");
+  const result = await app.cli(...app.cliFlags, "Inspect the project");
   assert.equal(result.code, 1, result.stderr);
   assert.match(result.stderr, /empty answer/);
   assert.doesNotMatch(result.stdout, /Orchestrator >/);

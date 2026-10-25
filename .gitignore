@@ -1,5 +1,7 @@
 node_modules/
 .npm-cache/
 .env
+/models.local.json
+/agents.local.json
 *.log
 data/
