@@ -5,6 +5,11 @@ import { AGENT_ROLES, type AgentRole } from "./agent-config.js";
 
 export type AgentStatus = "running" | "waiting" | "settled" | "failed" | "interrupted";
 
+export interface WorkflowState {
+  revision: number;
+  plan?: { text: string; plannerIds: string[] };
+}
+
 export interface CheckpointAgent {
   id: string;
   role: AgentRole;
@@ -15,6 +20,9 @@ export interface CheckpointAgent {
   error?: string;
   question?: string;
   answer?: string;
+  revision?: number;
+  review?: { approved: boolean; reason: string; revision: number };
+  resolution?: string;
 }
 
 export interface CheckpointOrchestrator {
@@ -25,7 +33,8 @@ export interface CheckpointOrchestrator {
 }
 
 export interface RunCheckpoint {
-  version: 1;
+  version: 2;
+  workflow: WorkflowState;
   runId: string;
   createdAt: string;
   updatedAt: string;
@@ -57,7 +66,8 @@ export class RunStore {
     await mkdir(options.directory, { recursive: true });
     const now = new Date().toISOString();
     const store = new RunStore(options.directory, {
-      version: 1,
+      version: 2,
+      workflow: { revision: 0 },
       runId: randomUUID(),
       createdAt: now,
       updatedAt: now,
@@ -90,7 +100,11 @@ export class RunStore {
     }
     if (typeof parsed !== "object" || parsed === null) throw new Error(`Invalid run.json: ${file}`);
     const candidate = parsed as Record<string, unknown>;
-    if (candidate.version !== 1) {
+    if (candidate.version === 1) {
+      // Legacy history stays evidence; never fabricate prior plan/review decisions.
+      candidate.version = 2;
+      candidate.workflow = { revision: 0 };
+    } else if (candidate.version !== 2) {
       throw new Error(`Unsupported run.json version: ${String(candidate.version)}`);
     }
     if (
@@ -107,6 +121,7 @@ export class RunStore {
       if (ids.has(agent.id)) throw new Error(`Duplicate agent id in run.json: ${agent.id}`);
       ids.add(agent.id);
     }
+    validateWorkflow(candidate.workflow, candidate.agents as CheckpointAgent[], file);
     if (candidate.orchestrator !== undefined || candidate.request !== undefined) {
       const orchestrator = candidate.orchestrator as Record<string, unknown> | null;
       if (typeof candidate.request !== "string" || !candidate.request.trim() ||
@@ -131,6 +146,10 @@ export class RunStore {
 
   agents(): readonly CheckpointAgent[] {
     return this.state.agents;
+  }
+
+  get workflow(): WorkflowState {
+    return this.state.workflow;
   }
 
   get runId(): string {
@@ -183,7 +202,34 @@ function validateAgent(value: unknown, file: string): void {
   if (typeof agent.id !== "string" || typeof agent.assignment !== "string") invalid();
   if (!(AGENT_ROLES as readonly string[]).includes(agent.role as string)) invalid();
   if (!(AGENT_STATUSES as readonly string[]).includes(agent.status as string)) invalid();
-  for (const key of ["sessionFile", "report", "error", "question", "answer"]) {
+  for (const key of ["sessionFile", "report", "error", "question", "answer", "resolution"]) {
     if (agent[key] !== undefined && typeof agent[key] !== "string") invalid();
+  }
+  if (agent.revision !== undefined && (!Number.isSafeInteger(agent.revision) || Number(agent.revision) < 1)) invalid();
+  if (agent.review !== undefined) {
+    const review = agent.review as Record<string, unknown> | null;
+    if (agent.role !== "reviewer" || !review || typeof review !== "object" ||
+        typeof review.approved !== "boolean" || typeof review.reason !== "string" || !review.reason.trim() ||
+        review.revision !== agent.revision || !Number.isSafeInteger(review.revision) || Number(review.revision) < 1) invalid();
+  }
+}
+
+function validateWorkflow(value: unknown, agents: CheckpointAgent[], file: string): void {
+  const invalid = (): never => { throw new Error(`Invalid workflow checkpoint: ${file}`); };
+  if (!value || typeof value !== "object") invalid();
+  const workflow = value as Record<string, unknown>;
+  if (!Number.isSafeInteger(workflow.revision) || Number(workflow.revision) < 0) invalid();
+  for (const agent of agents) {
+    if (agent.revision !== undefined && agent.revision > Number(workflow.revision)) invalid();
+  }
+  if (workflow.plan !== undefined) {
+    const plan = workflow.plan as Record<string, unknown> | null;
+    if (!plan || typeof plan !== "object") return invalid();
+    if (typeof plan.text !== "string" || !plan.text.trim() ||
+        !Array.isArray(plan.plannerIds) || !plan.plannerIds.length || new Set(plan.plannerIds).size !== plan.plannerIds.length) invalid();
+    for (const id of plan.plannerIds as unknown[]) {
+      const planner = agents.find((agent) => agent.id === id);
+      if (typeof id !== "string" || !planner || planner.role !== "planner" || planner.status !== "settled" || !planner.report) invalid();
+    }
   }
 }

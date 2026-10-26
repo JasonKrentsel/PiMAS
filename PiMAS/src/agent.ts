@@ -11,6 +11,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig, AgentRole } from "./agent-config.js";
+import { createExecutorBashTool } from "./execution-tools.js";
 
 interface RoleSessionOptions {
   cwd: string;
@@ -23,9 +24,6 @@ interface RoleSessionOptions {
 
 /** The caller owns prompting, local history, and abort/dispose of each Pi session. */
 export async function createRoleSession(options: RoleSessionOptions): Promise<AgentSession> {
-  if (options.role !== "orchestrator" && options.role !== "planner") {
-    throw new Error("Only orchestrator and planner sessions are enabled; execution and review are not implemented yet.");
-  }
   const profile = options.roles[options.role];
   const systemPrompt = (await readFile(profile.systemPrompt, "utf8")).trim();
   if (!systemPrompt) throw new Error(`System prompt is empty: ${profile.systemPrompt}`);
@@ -72,13 +70,21 @@ export async function createRoleSession(options: RoleSessionOptions): Promise<Ag
     reload: async () => {},
   };
 
-  const customTools = options.customTools ?? [];
+  const suppliedTools = options.customTools ?? [];
+  const nativeNames = new Set(["read", "grep", "find", "ls", "write", "edit", "bash", "powershell"]);
+  if (suppliedTools.some((tool) => nativeNames.has(tool.name))) {
+    throw new Error("Custom tools cannot replace native role permissions");
+  }
+  const customTools: ToolDefinition[] = [
+    ...suppliedTools,
+    ...(options.role === "executor" ? [createExecutorBashTool(options.cwd)] : []),
+  ];
   const { session } = await createAgentSession({
     cwd: options.cwd,
     modelRuntime,
     model,
     thinkingLevel: profile.thinkingLevel,
-    tools: ["read", "grep", "find", "ls", ...customTools.map((tool) => tool.name)],
+    tools: ["read", "grep", "find", "ls", ...(options.role === "executor" ? ["edit", "write"] : []), ...customTools.map((tool) => tool.name)],
     customTools,
     sessionManager: options.sessionManager,
     settingsManager,

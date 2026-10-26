@@ -11,6 +11,8 @@ import { createRoleSession } from "./agent.js";
 import { getFinalAnswer } from "./answer.js";
 import { openSavedSession } from "./recovery.js";
 import { RunStore, type AgentStatus } from "./run-store.js";
+import { assertWorkerAllowed, beginWorker } from "./workflow.js";
+import { createSubmitReviewTool, createWorkflowTools } from "./workflow-tools.js";
 
 /** How long a worker waits for an answer before it is reported as paused. */
 export const ANSWER_WAIT_MS = 2 * 60 * 1000;
@@ -80,6 +82,7 @@ export class AgentRuntime {
   private readonly answerWaitMs: number;
   private notifier: ((text: string) => void) | undefined;
   private nextId = 1;
+  private closed = false;
 
   constructor(private readonly options: AgentRuntimeOptions) {
     this.answerWaitMs = options.answerWaitMs ?? ANSWER_WAIT_MS;
@@ -88,6 +91,10 @@ export class AgentRuntime {
   /** The run directory holding run.json and the Pi session files. */
   get runDirectory(): string {
     return this.options.runStore.directory;
+  }
+
+  workflowTools(): ToolDefinition[] {
+    return createWorkflowTools(this.options.runStore);
   }
 
   /**
@@ -130,7 +137,7 @@ export class AgentRuntime {
         role: entry.role,
         roles: this.options.roles,
         sessionManager: await openSavedSession(entry.sessionFile, this.options.cwd),
-        customTools: [createAskTool(this, entry.id, entry.role)],
+        customTools: createWorkerTools(this, this.options.runStore, entry.id, entry.role),
       });
       this.agents.set(entry.id, { id: entry.id, role: entry.role, status: "interrupted", session });
     }
@@ -159,26 +166,40 @@ export class AgentRuntime {
 
   /** Create a session, record it, and start the assignment without waiting for the model. */
   async spawn(role: AgentRole, assignment: string): Promise<string> {
-    if (role === "orchestrator") {
-      throw new Error("The orchestrator cannot spawn another orchestrator");
-    }
+    if (this.closed) throw new Error("Agent runtime is disposed");
+    assertWorkerAllowed(this.options.runStore, role);
     const text = assignment.trim();
     if (!text) throw new Error("The assignment must not be empty");
     const id = `agent-${this.nextId++}`;
+    const manager = SessionManager.create(this.options.cwd, path.join(this.runDirectory, "sessions"));
+    // A committed launch must reference an existing transcript, even before inference.
+    manager.appendMessage({ role: "user", content: text, timestamp: Date.now() });
     const session = await createRoleSession({
       cwd: this.options.cwd,
       modelsFile: this.options.modelsFile,
       role,
       roles: this.options.roles,
-      sessionManager: SessionManager.create(this.options.cwd, path.join(this.runDirectory, "sessions")),
-      customTools: [createAskTool(this, id, role)],
+      sessionManager: manager,
+      customTools: createWorkerTools(this, this.options.runStore, id, role),
     });
-    this.agents.set(id, { id, role, status: "running", session });
-    this.options.runStore.addAgent({ id, role, assignment: text, status: "running", sessionFile: session.sessionFile });
-    // Record the launch before any work starts, so a restart sees it.
-    await this.options.runStore.save();
-    void this.run(id, text);
-    return id;
+    try {
+      if (this.closed) throw new Error("Agent runtime is disposed");
+      const revision = beginWorker(this.options.runStore, role);
+      this.agents.set(id, { id, role, status: "running", session });
+      this.options.runStore.addAgent({ id, role, assignment: text, status: "running", sessionFile: session.sessionFile,
+        ...(revision === undefined ? {} : { revision }) });
+      // Record the launch before any work starts, so a restart sees it.
+      await this.options.runStore.save();
+      if (this.closed) throw new Error("Agent runtime is disposed");
+      void this.run(id, "Carry out your recorded assignment, then report evidence, checks, and limitations.");
+      return id;
+    } catch (error) {
+      session.dispose();
+      this.agents.delete(id);
+      const entry = this.options.runStore.agent(id);
+      if (entry) entry.status = "interrupted";
+      throw error;
+    }
   }
 
   private async run(id: string, assignment: string): Promise<void> {
@@ -188,6 +209,10 @@ export class AgentRuntime {
     try {
       await record.session.prompt(assignment);
       const report = getFinalAnswer(record.session);
+      if (record.role === "reviewer" && !entry?.review) {
+        throw new Error("Reviewer must call submit_review with an explicit verdict before finishing");
+      }
+      if (this.closed) return;
       if (entry) {
         entry.status = "settled";
         entry.report = report;
@@ -286,10 +311,17 @@ export class AgentRuntime {
 
   /** Continue an interrupted agent's saved conversation in place. */
   async resumeAgent(agentId: string, instruction?: string): Promise<void> {
+    if (this.closed) throw new Error("Agent runtime is disposed");
     const record = this.agents.get(agentId);
     if (!record) throw new Error(`Agent ${agentId} is not available to resume`);
     if (record.status !== "interrupted") throw new Error(`Agent ${agentId} is ${record.status}, not interrupted`);
     const entry = this.options.runStore.agent(agentId);
+    if (entry?.resolution) throw new Error(`Agent ${agentId} was retired and cannot resume`);
+    const revision = beginWorker(this.options.runStore, record.role);
+    if (entry) {
+      if (revision !== undefined) entry.revision = revision;
+      entry.review = undefined;
+    }
     record.status = "running";
     if (entry) {
       entry.status = "running";
@@ -351,6 +383,7 @@ export class AgentRuntime {
 
   /** Record live agents as interrupted, then abort and dispose every session. */
   async dispose(): Promise<void> {
+    this.closed = true;
     for (const record of this.agents.values()) {
       if (record.status !== "running" && record.status !== "waiting") continue;
       record.status = "interrupted";
@@ -385,8 +418,8 @@ export function createOrchestratorTools(runtime: AgentRuntime): ToolDefinition[]
     label: "Spawn agent",
     description: "Start a new agent on one self-contained assignment and return its id immediately. The agent cannot see your conversation, so include the context it needs. Use wait_for_agents to collect its report.",
     parameters: Type.Object({
-      role: Type.Literal("planner", {
-        description: "Role of the agent to spawn. Planners inspect and report; they cannot edit files, run commands, or delegate.",
+      role: Type.Union([Type.Literal("planner"), Type.Literal("executor"), Type.Literal("reviewer")], {
+        description: "Planners inspect; executors edit and run bounded commands after plan acceptance; reviewers inspect settled execution and submit a verdict. Workers cannot delegate.",
       }),
       assignment: Type.String({ minLength: 1, description: "The assignment, including any context the agent needs." }),
     }),
@@ -468,7 +501,11 @@ export function createOrchestratorTools(runtime: AgentRuntime): ToolDefinition[]
     },
   });
 
-  return [spawnAgent, waitForAgents, answerWorker, resumeAgentTool];
+  return [spawnAgent, waitForAgents, answerWorker, resumeAgentTool, ...runtime.workflowTools()];
+}
+
+function createWorkerTools(runtime: AgentRuntime, store: RunStore, agentId: string, role: AgentRole): ToolDefinition[] {
+  return [createAskTool(runtime, agentId, role), ...(role === "reviewer" ? [createSubmitReviewTool(store, agentId)] : [])];
 }
 
 /** Worker side: ask the orchestrator and wait for its answer. */

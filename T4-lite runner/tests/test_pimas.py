@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from t4_lite.contracts import Harness
 from t4_lite.core import Invalid, create_run, load_benchmark, load_run, read_results
 from t4_lite.docker import DockerSession, compose_override, task_command
-from t4_lite.pimas import ContainerSession, resolve_image, run_one
+from t4_lite.pimas import SMOKE, ContainerSession, resolve_image, run_one, smoke
 
 
 class ContainerTests(unittest.TestCase):
@@ -124,6 +124,35 @@ class ContainerTests(unittest.TestCase):
                     run_one(benchmark, folder, task_id=task["id"], image="derived", config=config,
                             model="scripted", agent="pimas", profile={"schema_version": 1})
                 factory.assert_not_called()
+
+    def test_implementation_smoke_requires_current_saved_approval_without_grading(self):
+        benchmark = load_benchmark()
+        for verdict in ("approved", "missing", "stale"):
+            with self.subTest(verdict=verdict), tempfile.TemporaryDirectory() as tmp:
+                session = Mock()
+                session.state = Path(tmp)
+                checkpoint = {"runId": "smoke-run", "orchestrator": {"status": "settled"},
+                              "workflow": {"revision": 1, "plan": {"text": "smoke plan"}},
+                              "agents": [{"role": "planner", "status": "settled"},
+                                         {"role": "executor", "status": "settled"},
+                                         {"role": "reviewer", "status": "settled"}]}
+                if verdict != "missing":
+                    checkpoint["agents"][2]["review"] = {"approved": True, "revision": 1 if verdict == "approved" else 0}
+                with patch("t4_lite.pimas.resolve_image", return_value="sha256:derived"), \
+                     patch("t4_lite.pimas.verify_packages"), \
+                     patch("t4_lite.pimas.ContainerSession", return_value=session), \
+                     patch("t4_lite.pimas.drive_harness", return_value="done"), \
+                     patch("t4_lite.pimas.read_json", return_value=checkpoint):
+                    if verdict == "approved":
+                        report = smoke(benchmark, task_id="telecom-entity-resolution", image="derived", state=Path(tmp), implementation=True)
+                        self.assertFalse(report["graded"])
+                        self.assertEqual(report["workflow"], "implementation")
+                    else:
+                        with self.assertRaisesRegex(Invalid, "current independent approval"):
+                            smoke(benchmark, task_id="telecom-entity-resolution", image="derived", state=Path(tmp), implementation=True)
+                self.assertEqual(session.spawn_harness.call_args.args[0].command, (SMOKE, "--implementation"))
+                session.grade.assert_not_called()
+                session.close.assert_called_once()
 
     def test_stop_targets_the_container_group_even_after_host_client_exits(self):
         with tempfile.TemporaryDirectory() as tmp:

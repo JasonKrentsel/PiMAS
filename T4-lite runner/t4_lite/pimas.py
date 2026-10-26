@@ -153,7 +153,7 @@ def run_one(benchmark, folder: Path, *, task_id: str, image: str, config: Path,
                          session_factory=lambda: ContainerSession(image=image_id, task_id=task_id, state=state, config=config))
 
 
-def smoke(benchmark, *, task_id: str, image: str, state: Path) -> dict:
+def smoke(benchmark, *, task_id: str, image: str, state: Path, implementation: bool = False) -> dict:
     task = benchmark.task(task_id)
     verify_packages(benchmark)
     layout = layout_for(benchmark, task)
@@ -161,11 +161,13 @@ def smoke(benchmark, *, task_id: str, image: str, state: Path) -> dict:
     session = ContainerSession(image=image_id, task_id=task_id, state=state)
     try:
         session.open(layout)
-        session.spawn_harness(Harness(command=(SMOKE,)))
+        session.spawn_harness(Harness(command=(SMOKE, "--implementation") if implementation else (SMOKE,)))
         deadline = time.monotonic() + 90
         session.arm_deadline(deadline)
         outcome = drive_harness(session.read_line, session.write, session.execute,
-                                {"type": "task", "task_id": task_id, "cwd": "/app", "prompt": "Read the native smoke fixture and report."},
+                                {"type": "task", "task_id": task_id, "cwd": "/app", "prompt":
+                                 "Plan, implement, check, and independently review the native smoke fixture." if implementation
+                                 else "Read the native smoke fixture and report."},
                                 deadline=deadline, alive=session.harness_running)
         if outcome != "done":
             raise Invalid("Container smoke did not finish: " + session.stderr)
@@ -173,8 +175,19 @@ def smoke(benchmark, *, task_id: str, image: str, state: Path) -> dict:
         checkpoint = read_json(session.state / "run/run.json")
         if checkpoint["orchestrator"]["status"] != "settled":
             raise Invalid("Smoke did not persist a settled orchestrator")
+        if implementation:
+            agents = checkpoint.get("agents", [])
+            revision = checkpoint.get("workflow", {}).get("revision")
+            if ([agent.get("role") for agent in agents] != ["planner", "executor", "reviewer"]
+                    or any(agent.get("status") != "settled" for agent in agents)
+                    or not checkpoint.get("workflow", {}).get("plan")
+                    or not isinstance(revision, int) or revision < 1
+                    or agents[2].get("review", {}).get("approved") is not True
+                    or agents[2].get("review", {}).get("revision") != revision):
+                raise Invalid("Implementation smoke did not persist current independent approval")
         return {"smoke": "passed", "task_id": task_id, "image_id": image_id, "state": str(session.state),
-                "run_id": checkpoint["runId"], "graded": False}
+                "run_id": checkpoint["runId"], "graded": False,
+                "workflow": "implementation" if implementation else "inspection"}
     finally:
         session.close()
 
@@ -188,6 +201,7 @@ def main(argv=None) -> int:
         command.add_argument("--image", required=True, help="Locally built PiMAS derivative of this task image")
         if name == "smoke":
             command.add_argument("--state", type=Path, required=True, help="New host directory for smoke state")
+            command.add_argument("--implementation", action="store_true", help="Exercise native execution, command timeout, and independent review without live inference")
         else:
             command.add_argument("folder", type=Path)
             command.add_argument("--config", type=Path, required=True)
@@ -199,7 +213,7 @@ def main(argv=None) -> int:
     try:
         benchmark = load_benchmark()
         if args.command == "smoke":
-            report = smoke(benchmark, task_id=args.task, image=args.image, state=args.state)
+            report = smoke(benchmark, task_id=args.task, image=args.image, state=args.state, implementation=args.implementation)
         else:
             env = []
             for key in args.harness_env:

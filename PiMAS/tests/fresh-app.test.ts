@@ -458,12 +458,126 @@ test("orchestrator and planner use their own profiles and isolated persisted con
   assert.equal(app.requests.length, 2);
 });
 
-test("executor and reviewer sessions remain disabled", TIMEOUT, async (t) => {
-  const app = await fixture(t, () => { throw new Error("Disabled roles must not call the model"); });
-  for (const role of ["executor", "reviewer"] as const) {
-    await assert.rejects(app.session(role), /Only orchestrator and planner sessions are enabled/);
+test("only executor sessions receive native mutation and bounded shell tools", TIMEOUT, async (t) => {
+  const app = await fixture(t, () => { throw new Error("Session creation must not call the model"); });
+  for (const role of ["orchestrator", "planner", "reviewer"] as const) {
+    const session = await app.session(role);
+    assert.deepEqual(session.getActiveToolNames().sort(), ["find", "grep", "ls", "read"]);
   }
+  const executor = await app.session("executor");
+  assert.deepEqual(executor.getActiveToolNames().sort(), ["bash", "edit", "find", "grep", "ls", "read", "write"]);
+  assert.equal(executor.settingsManager.getProviderRetrySettings().maxRetries, 100);
+  assert.equal(executor.settingsManager.getCompactionEnabled(), true);
   assert.equal(app.requests.length, 0);
+});
+
+type ReviewScenario = "approved" | "missing" | "rejected" | "stale" | "prose-only";
+
+async function implementationFixture(t: TestContext, scenario: ReviewScenario) {
+  let orchestratorTurn = 0;
+  const command = `"${process.execPath.replaceAll("\\", "/")}" -e 'const fs=require("node:fs");if(fs.readFileSync("answer.txt","utf8")!=="complete\\n")process.exit(7);console.log("COMMAND_CHECK_PASSED")'`;
+  return fixture(t, (request) => {
+    const names = request.tools.map((tool) => tool.function.name).sort();
+    const results = request.messages.filter((message) => message.role === "tool");
+    const lastResult = JSON.stringify(results.at(-1));
+    if (names.includes("write")) {
+      assert.deepEqual(names, ["ask_orchestrator", "bash", "edit", "find", "grep", "ls", "read", "write"]);
+      if (results.length === 0) return { tool: "write", args: { path: "answer.txt", content: "initial\n" } };
+      if (results.length === 1) return { tool: "edit", args: { path: "answer.txt", edits: [{ oldText: "initial", newText: "complete" }] } };
+      if (results.length === 2) return { tool: "bash", args: { command, timeout: 5 } };
+      assert.match(lastResult, /COMMAND_CHECK_PASSED/);
+      return { text: "EXECUTION_EVIDENCE: answer.txt changed with write/edit; native bash check exited 0: COMMAND_CHECK_PASSED." };
+    }
+    if (names.includes("submit_review")) {
+      assert.deepEqual(names, ["ask_orchestrator", "find", "grep", "ls", "read", "submit_review"]);
+      assert.match(JSON.stringify(request.messages), /EXECUTION_EVIDENCE/);
+      if (results.length === 0) return { tool: "read", args: { path: "answer.txt" } };
+      if (results.length === 1) {
+        assert.match(lastResult, /complete/);
+        if (scenario === "prose-only") return { text: "Approved in prose without a saved verdict." };
+        return { tool: "submit_review", args: {
+          approved: scenario !== "rejected",
+          reason: scenario === "rejected" ? "The assignment needs another acceptance check." : "Read answer.txt and inspected supplied COMMAND_CHECK_PASSED execution evidence; no independent shell execution.",
+        } };
+      }
+      assert.match(lastResult, /Review (approval|rejection) saved/);
+      return { text: "REVIEW_EVIDENCE: implementation inspected; verdict saved with limitations." };
+    }
+    if (!names.includes("spawn_agent")) return { text: "PLAN_EVIDENCE: write answer.txt, edit it to complete, run a native Node assertion, then independently review." };
+    switch (orchestratorTurn++) {
+      case 0: return { tool: "spawn_agent", args: { role: "executor", assignment: "Premature execution must be rejected." } };
+      case 1:
+        assert.match(lastResult, /Accept a plan/);
+        return { tool: "spawn_agent", args: { role: "planner", assignment: "Plan the answer.txt implementation and verification." } };
+      case 2: return { tool: "wait_for_agents", args: { agentId: "agent-1" } };
+      case 3:
+        assert.match(lastResult, /PLAN_EVIDENCE/);
+        return { tool: "accept_plan", args: { plannerIds: ["agent-1"], plan: "Write answer.txt, edit initial to complete, assert exact contents through Node, and inspect file/check evidence in independent review." } };
+      case 4: return { tool: "spawn_agent", args: { role: "executor", assignment: "Implement the accepted answer.txt plan with native write/edit and run the exact-content Node check." } };
+      case 5: return { tool: "wait_for_agents", args: { agentId: "agent-2" } };
+      case 6:
+        assert.match(lastResult, /EXECUTION_EVIDENCE/);
+        if (scenario === "missing") return { text: "Premature implementation completion without review." };
+        return { tool: "spawn_agent", args: { role: "reviewer", assignment: "Accepted plan: answer.txt must contain complete plus newline. EXECUTION_EVIDENCE: executor used native write/edit and bash; Node exact-content check exited 0 with COMMAND_CHECK_PASSED. Inspect answer.txt and submit an explicit verdict; you cannot run commands." } };
+      case 7: return { tool: "wait_for_agents", args: { agentId: "agent-3" } };
+      case 8:
+        if (scenario === "stale") return { tool: "spawn_agent", args: { role: "executor", assignment: "Repeat the accepted implementation/check as a new execution revision." } };
+        if (scenario !== "approved") return { text: "Premature completion despite absent approval." };
+        return { tool: "workflow_status", args: {} };
+      case 9:
+        if (scenario === "stale") return { tool: "wait_for_agents", args: { agentId: "agent-4" } };
+        assert.match(lastResult, /completionBlocker/);
+        assert.match(lastResult, /null/);
+        return { text: "Implemented answer.txt, ran the native check, and received independent approval." };
+      case 10: return { text: "Premature completion using stale approval." };
+      default: throw new Error("Unexpected orchestrator continuation");
+    }
+  });
+}
+
+test("headless implementation writes, edits, runs a check, and persists independent review", TIMEOUT, async (t) => {
+  const app = await implementationFixture(t, "approved");
+  const task = await app.task("Implement answer.txt with complete plus newline, verify it, and obtain independent review.");
+  assert.match(await task.execute(), /received independent approval/);
+  assert.equal(await readFile(path.join(app.cwd, "answer.txt"), "utf8"), "complete\n");
+  const saved = await RunStore.open(task.directory);
+  assert.equal(saved.orchestrator?.status, "settled");
+  assert.equal(saved.agents().length, 3, "Rejected pre-plan spawn must not create a worker");
+  assert.equal(saved.workflow.revision, 1);
+  const executor = saved.agent("agent-2")!;
+  const reviewer = saved.agent("agent-3")!;
+  assert.equal(executor.status, "settled");
+  assert.equal(reviewer.status, "settled");
+  assert.equal(reviewer.review?.approved, true);
+  assert.equal(reviewer.review.revision, saved.workflow.revision);
+  assert.notEqual(executor.sessionFile, reviewer.sessionFile);
+  const history = SessionManager.open(executor.sessionFile!).buildSessionContext().messages;
+  for (const tool of ["write", "edit", "bash"]) {
+    assert.ok(history.some((message) => message.role === "toolResult" && message.toolName === tool && !message.isError));
+  }
+  assert.ok(SessionManager.open(reviewer.sessionFile!).buildSessionContext().messages.some((message) => message.role === "toolResult" && message.toolName === "submit_review" && !message.isError));
+  await task.dispose();
+  const calls = app.requests.length;
+  const resumed = await app.resumeTask(task.directory);
+  assert.match(await resumed.execute(), /received independent approval/);
+  assert.equal(app.requests.length, calls, "Completed reviewed result must not run inference again");
+});
+
+test("headless completion rejects missing, rejected, prose-only, and stale review", TIMEOUT, async (t) => {
+  for (const scenario of ["missing", "rejected", "prose-only", "stale"] as const) {
+    await t.test(scenario, async (t) => {
+      const app = await implementationFixture(t, scenario);
+      const task = await app.task("Implement and verify answer.txt, with required independent approval.");
+      await assert.rejects(task.execute(), scenario === "rejected" ? /Every reviewer/ : scenario === "prose-only" ? /Unresolved assignments/ : /no independent review/);
+      const saved = await RunStore.open(task.directory);
+      assert.equal(saved.orchestrator?.status, "failed");
+      if (scenario === "prose-only") assert.match(saved.agent("agent-3")!.error!, /must call submit_review/);
+      if (scenario === "stale") {
+        assert.equal(saved.workflow.revision, 2);
+        assert.equal(saved.agent("agent-3")!.review?.revision, 1);
+      }
+    });
+  }
 });
 
 test("the orchestrator spawns a planner asynchronously and collects its report", TIMEOUT, async (t) => {
@@ -479,7 +593,7 @@ test("the orchestrator spawns a planner asynchronously and collects its report",
       assert.match(context, /Use GET \/api\/items/);
       return { text: "Planner findings: GET /api/items is the specified interface." };
     }
-    assert.deepEqual(request.tools.map((tool) => tool.function.name).sort(), ["answer_worker", "find", "grep", "ls", "read", "resume_agent", "spawn_agent", "wait_for_agents"]);
+    assert.deepEqual(request.tools.map((tool) => tool.function.name).sort(), ["accept_plan", "answer_worker", "find", "grep", "ls", "read", "resolve_agent", "resume_agent", "spawn_agent", "wait_for_agents", "workflow_status"]);
     if (!request.messages.some((message) => message.role === "tool")) {
       return { tool: "spawn_agent", args: { role: "planner", assignment: "Inspect notes.txt and report the interface" } };
     }
@@ -592,12 +706,13 @@ test("aborting the orchestrator stops its wait, and dispose aborts live agents",
   assert.ok(interrupted.sessionFile);
 });
 
-test("the runtime rejects spawning an orchestrator, an empty assignment, or a disabled role", TIMEOUT, async (t) => {
+test("the runtime rejects an orchestrator, an empty assignment, or execution before a plan", TIMEOUT, async (t) => {
   const app = await fixture(t, () => { throw new Error("Invalid spawns must not call the model"); });
   const runtime = await app.runtime();
   await assert.rejects(runtime.spawn("orchestrator", "Do everything"), /cannot spawn another orchestrator/);
   await assert.rejects(runtime.spawn("planner", "   "), /must not be empty/);
-  await assert.rejects(runtime.spawn("executor", "Edit a file"), /Only orchestrator and planner sessions are enabled/);
+  await assert.rejects(runtime.spawn("executor", "Edit a file"), /Accept a plan/);
+  await assert.rejects(runtime.spawn("reviewer", "Inspect a file"), /settled execution/);
   assert.equal(app.requests.length, 0);
 });
 
@@ -641,7 +756,8 @@ test("a planner's question reaches the orchestrator and its answer resumes the p
   assert.equal(orchestrator.getLastAssistantText(), "The planner proposed the versioned endpoint.");
   assert.equal(app.requests.length, 7);
   const checkpoint = JSON.parse(await readFile(path.join(runtime.runDirectory, "run.json"), "utf8"));
-  assert.equal(checkpoint.version, 1);
+  assert.equal(checkpoint.version, 2);
+  assert.deepEqual(checkpoint.workflow, { revision: 0 });
   assert.equal(checkpoint.cwd, app.cwd);
   assert.equal(checkpoint.modelsFile, app.modelsFile);
   assert.equal(checkpoint.agents.length, 1);

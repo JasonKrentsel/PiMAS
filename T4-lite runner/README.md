@@ -11,7 +11,7 @@ The harness is yours. `t4_lite/contracts.py` defines `Harness`: a host command a
 
 ## PiMAS in-container integration
 
-An opt-in [PiMAS integration](docs/PIMAS.md) installs the agent into a derived task image and mounts attempt state outside `/app`. It includes a model-free real-container smoke command and a single-task evaluation entry point. The original host-harness protocol below is unchanged. The first slice is planner-only and is not yet a benchmark-capable solver.
+An opt-in [PiMAS integration](docs/PIMAS.md) installs the agent into a derived task image and mounts attempt state outside `/app`. It includes model-free real-container inspection and plan/execute/review smokes, bounded native shell commands, and a single-task evaluation entry point. The original host-harness protocol below is unchanged. The telecom workflow has passed scripted native-tool verification and one small live-model task in a blank mounted workspace. Broad task-solving quality remains unmeasured, and no official PiMAS grade has been produced.
 
 ## Quick start
 

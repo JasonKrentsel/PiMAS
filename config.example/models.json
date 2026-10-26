@@ -1,0 +1,29 @@
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "local": {
+      "name": "Example local endpoint",
+      "baseUrl": "http://host.docker.internal:1234/v1",
+      "api": "openai-completions",
+      "apiKey": "unused",
+      "authHeader": false,
+      "models": [
+        {
+          "id": "YOUR_MODEL_ID",
+          "name": "Your local model",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 128000,
+          "maxTokens": 4096,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+          "compat": {
+            "supportsStore": false,
+            "supportsDeveloperRole": false,
+            "supportsReasoningEffort": false,
+            "maxTokensField": "max_tokens"
+          }
+        }
+      ]
+    }
+  }
+}

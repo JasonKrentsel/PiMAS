@@ -6,6 +6,7 @@ import { getFinalAnswer } from "./answer.js";
 import { openSavedSession } from "./recovery.js";
 import { RunStore } from "./run-store.js";
 import { AgentRuntime, createOrchestratorTools } from "./runtime.js";
+import { completionProblem } from "./workflow.js";
 
 export interface TaskRunOptions {
   directory: string;
@@ -109,6 +110,8 @@ export class TaskRun {
           instruction = `Worker event (runtime data). Continue coordinating the original task:\n${JSON.stringify(event)}`;
           continue;
         }
+        const blocker = completionProblem(this.store);
+        if (blocker) throw new Error(`Task cannot complete: ${blocker}`);
         state.status = "settled";
         state.report = report;
         await this.store.save();
