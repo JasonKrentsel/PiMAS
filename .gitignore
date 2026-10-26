@@ -1,2 +1,3 @@
 # Real provider/role configuration; tracked templates live in config.example/.
 /config/
+node_modules
