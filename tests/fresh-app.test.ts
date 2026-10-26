@@ -5,9 +5,11 @@ import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:f
 import { createServer, type ServerResponse } from "node:http";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
-import { createOrchestratorSession } from "../src/agent.js";
-import { loadAgentConfig } from "../src/agent-config.js";
+import { SessionManager, type AgentSession, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createRoleSession } from "../src/agent.js";
+import { AgentRuntime, createOrchestratorTools } from "../src/runtime.js";
+import { RunStore } from "../src/run-store.js";
+import { loadAgentConfig, type AgentRole } from "../src/agent-config.js";
 
 interface ChatRequest {
   model: string;
@@ -29,6 +31,7 @@ async function fixture(t: TestContext, respond: (request: ChatRequest, count: nu
   const cwd = await mkdtemp(path.join(dataDirectory, "fresh-test-"));
   const requests: ChatRequest[] = [];
   const sessions = new Set<AgentSession>();
+  const runtimes: AgentRuntime[] = [];
   let serverError: unknown;
   let notifyRequest!: () => void;
   const receivedRequest = new Promise<void>((resolve) => { notifyRequest = resolve; });
@@ -60,6 +63,7 @@ async function fixture(t: TestContext, respond: (request: ChatRequest, count: nu
   });
 
   t.after(async () => {
+    for (const runtime of runtimes) await runtime.dispose();
     for (const session of sessions) {
       try { await session.abort(); } finally { session.dispose(); }
     }
@@ -97,10 +101,40 @@ async function fixture(t: TestContext, respond: (request: ChatRequest, count: nu
     cliFlags,
     requests,
     receivedRequest,
-    async session(manager = SessionManager.create(cwd, path.join(cwd, "sessions"))) {
+    async runtime(answerWaitMs?: number) {
       const { roles } = await loadAgentConfig(agentsFile);
-      const session = await createOrchestratorSession({
-        cwd, modelsFile, profile: roles.orchestrator, sessionManager: manager,
+      const runStore = await RunStore.create({
+        directory: await mkdtemp(path.join(cwd, "run-")), cwd, modelsFile,
+      });
+      const runtime = new AgentRuntime({
+        cwd, modelsFile, roles, runStore,
+        ...(answerWaitMs === undefined ? {} : { answerWaitMs }),
+      });
+      runtimes.push(runtime);
+      return runtime;
+    },
+    async orchestratorFor(runtime: AgentRuntime) {
+      const { roles } = await loadAgentConfig(agentsFile);
+      const session = await createRoleSession({
+        cwd, modelsFile, role: "orchestrator", roles,
+        sessionManager: SessionManager.create(cwd, path.join(runtime.runDirectory, "sessions")),
+        customTools: createOrchestratorTools(runtime),
+      });
+      sessions.add(session);
+      return session;
+    },
+    async resume(runtime: AgentRuntime) {
+      const { roles } = await loadAgentConfig(agentsFile);
+      const resumed = await AgentRuntime.resume({
+        cwd, modelsFile, roles, runDirectory: runtime.runDirectory,
+      });
+      runtimes.push(resumed.runtime);
+      return resumed;
+    },
+    async session(role: AgentRole = "orchestrator", manager = SessionManager.create(cwd, path.join(cwd, "sessions")), customTools?: ToolDefinition[]) {
+      const { roles } = await loadAgentConfig(agentsFile);
+      const session = await createRoleSession({
+        cwd, modelsFile, role, roles, sessionManager: manager, customTools,
       });
       sessions.add(session);
       return session;
@@ -153,10 +187,30 @@ function sendReply(response: ServerResponse, reply: Exclude<Reply, { error: stri
       choices: [{ index: 0, delta: content, finish_reason: reason }],
     })}\n\n`);
   }
+  response.write(`data: ${JSON.stringify({
+    id: `chat_${id}`, object: "chat.completion.chunk", created: 1, model: "scripted-model",
+    choices: [], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+  })}\n\n`);
   response.end("data: [DONE]\n\n");
 }
 
 const TIMEOUT = { timeout: 40_000 };
+
+async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error("Timed out waiting for a condition");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+type ToolResult = Extract<AgentSession["messages"][number], { role: "toolResult" }>;
+
+function toolResults(session: AgentSession, toolName: string): ToolResult[] {
+  return session.messages.filter(
+    (message): message is ToolResult => message.role === "toolResult" && message.toolName === toolName,
+  );
+}
 
 test("fresh CLI prints usage without contacting a model or creating run storage", TIMEOUT, async (t) => {
   const app = await fixture(t, () => { throw new Error("Usage must not call the model"); });
@@ -303,13 +357,401 @@ test("independent Pi histories can be closed, reopened, and continued", TIMEOUT,
   await second.prompt("My word is beta");
   const file = first.sessionFile!;
   await app.closeSession(first);
-  const restored = await app.session(SessionManager.open(file));
+  const restored = await app.session("orchestrator", SessionManager.open(file));
   await restored.prompt("What is my word?");
   assert.equal(restored.getLastAssistantText(), "Your word is alpha.");
   assert.equal(second.getLastAssistantText(), "Remembered beta.");
   const saved = await readFile(file, "utf8");
   assert.match(saved, /Your word is alpha/);
   assert.doesNotMatch(saved, /test-secret/);
+});
+
+test("orchestrator and planner use their own profiles and isolated persisted conversations", TIMEOUT, async (t) => {
+  const app = await fixture(t, (request) => {
+    const context = JSON.stringify(request.messages);
+    assert.deepEqual(request.tools.map((tool) => tool.function.name).sort(), ["find", "grep", "ls", "read"]);
+    if (request.model === "planner-model") {
+      assert.equal(request.reasoning_effort, "high");
+      assert.match(context, /You are a planning agent/);
+      assert.match(context, /PLANNER_ONLY_CONTEXT/);
+      assert.doesNotMatch(context, /ORCHESTRATOR_ONLY_CONTEXT/);
+      return { text: "Planner findings." };
+    }
+    assert.equal(request.model, "scripted-model");
+    assert.match(context, /You are the orchestrator/);
+    assert.match(context, /ORCHESTRATOR_ONLY_CONTEXT/);
+    assert.doesNotMatch(context, /PLANNER_ONLY_CONTEXT/);
+    return { text: "Orchestrator findings." };
+  });
+  const models = JSON.parse(await readFile(app.modelsFile, "utf8"));
+  const plannerProvider = structuredClone(models.providers["fixture-provider"]);
+  plannerProvider.models[0].id = "planner-model";
+  plannerProvider.models[0].reasoning = true;
+  plannerProvider.models[0].compat.supportsReasoningEffort = true;
+  models.providers["planner-provider"] = plannerProvider;
+  await writeFile(app.modelsFile, JSON.stringify(models));
+  const agents = JSON.parse(await readFile(app.agentsFile, "utf8"));
+  agents.roles.planner.provider = "planner-provider";
+  agents.roles.planner.model = "planner-model";
+  agents.roles.planner.thinkingLevel = "high";
+  await writeFile(app.agentsFile, JSON.stringify(agents));
+
+  const orchestrator = await app.session("orchestrator");
+  const planner = await app.session("planner");
+  assert.equal(orchestrator.model?.provider, "fixture-provider");
+  assert.equal(orchestrator.model?.id, "scripted-model");
+  assert.equal(orchestrator.thinkingLevel, "off");
+  assert.equal(planner.model?.provider, "planner-provider");
+  assert.equal(planner.model?.id, "planner-model");
+  assert.equal(planner.thinkingLevel, "high");
+  const plannerPrompt = (await readFile(agents.roles.planner.systemPrompt, "utf8")).trim();
+  assert.ok(planner.systemPrompt.includes(plannerPrompt));
+  assert.notEqual(orchestrator.sessionFile, planner.sessionFile);
+  assert.deepEqual(planner.getActiveToolNames().sort(), ["find", "grep", "ls", "read"]);
+  assert.equal(planner.settingsManager.getProviderRetrySettings().maxRetries, 100);
+  assert.equal(planner.settingsManager.getCompactionEnabled(), true);
+
+  await orchestrator.prompt("ORCHESTRATOR_ONLY_CONTEXT");
+  await planner.prompt("PLANNER_ONLY_CONTEXT");
+  assert.equal(orchestrator.getLastAssistantText(), "Orchestrator findings.");
+  assert.equal(planner.getLastAssistantText(), "Planner findings.");
+  const orchestratorHistory = await readFile(orchestrator.sessionFile!, "utf8");
+  const plannerHistory = await readFile(planner.sessionFile!, "utf8");
+  assert.match(orchestratorHistory, /ORCHESTRATOR_ONLY_CONTEXT/);
+  assert.doesNotMatch(orchestratorHistory, /PLANNER_ONLY_CONTEXT/);
+  assert.match(plannerHistory, /PLANNER_ONLY_CONTEXT/);
+  assert.doesNotMatch(plannerHistory, /ORCHESTRATOR_ONLY_CONTEXT|test-secret/);
+  assert.equal(app.requests.length, 2);
+});
+
+test("executor and reviewer sessions remain disabled", TIMEOUT, async (t) => {
+  const app = await fixture(t, () => { throw new Error("Disabled roles must not call the model"); });
+  for (const role of ["executor", "reviewer"] as const) {
+    await assert.rejects(app.session(role), /Only orchestrator and planner sessions are enabled/);
+  }
+  assert.equal(app.requests.length, 0);
+});
+
+test("the orchestrator spawns a planner asynchronously and collects its report", TIMEOUT, async (t) => {
+  const app = await fixture(t, (request) => {
+    const context = JSON.stringify(request.messages);
+    if (context.includes("You are a planning agent")) {
+      assert.deepEqual(request.tools.map((tool) => tool.function.name).sort(), ["ask_orchestrator", "find", "grep", "ls", "read"]);
+      assert.match(context, /Inspect notes.txt and report the interface/);
+      assert.doesNotMatch(context, /ORCHESTRATOR_PRIVATE_CONTEXT/);
+      if (!request.messages.some((message) => message.role === "tool")) {
+        return { tool: "read", args: { path: "notes.txt" } };
+      }
+      assert.match(context, /Use GET \/api\/items/);
+      return { text: "Planner findings: GET /api/items is the specified interface." };
+    }
+    assert.deepEqual(request.tools.map((tool) => tool.function.name).sort(), ["answer_worker", "find", "grep", "ls", "read", "resume_agent", "spawn_agent", "wait_for_agents"]);
+    if (!request.messages.some((message) => message.role === "tool")) {
+      return { tool: "spawn_agent", args: { role: "planner", assignment: "Inspect notes.txt and report the interface" } };
+    }
+    if (context.includes("settled:")) {
+      assert.match(context, /Planner findings: GET \/api\/items/);
+      return { text: "The planner found GET /api/items. No changes were made." };
+    }
+    assert.match(context, /Spawned planner agent-1/);
+    assert.doesNotMatch(context, /Planner findings/);
+    return { tool: "wait_for_agents", args: {} };
+  });
+  await writeFile(path.join(app.cwd, "notes.txt"), "Use GET /api/items");
+  const runtime = await app.runtime();
+  const orchestrator = await app.orchestratorFor(runtime);
+  await orchestrator.prompt("ORCHESTRATOR_PRIVATE_CONTEXT: commission an investigation.");
+  assert.equal(orchestrator.getLastAssistantText(), "The planner found GET /api/items. No changes were made.");
+  const spawn = orchestrator.messages.find((message) => message.role === "toolResult" && message.toolName === "spawn_agent");
+  assert.ok(spawn?.role === "toolResult");
+  assert.equal(spawn.isError, false);
+  assert.match(JSON.stringify(spawn.content), /Spawned planner agent-1/);
+  assert.equal((spawn.details as { agentId: string }).agentId, "agent-1");
+  const collected = orchestrator.messages.find((message) => message.role === "toolResult" && message.toolName === "wait_for_agents");
+  assert.ok(collected?.role === "toolResult");
+  assert.equal(collected.isError, false);
+  assert.equal(collected.usage?.input, 20);
+  assert.equal(collected.usage?.output, 4);
+  assert.equal(collected.usage?.totalTokens, 24);
+  const details = collected.details as { sessionFile: string; role: string; report: string };
+  assert.equal(details.role, "planner");
+  assert.match(details.report, /Planner findings/);
+  assert.notEqual(details.sessionFile, orchestrator.sessionFile);
+  assert.equal(path.dirname(details.sessionFile), path.dirname(orchestrator.sessionFile!));
+  const plannerHistory = await readFile(details.sessionFile, "utf8");
+  assert.match(plannerHistory, /Inspect notes.txt and report the interface/);
+  assert.match(plannerHistory, /Planner findings/);
+  assert.doesNotMatch(plannerHistory, /ORCHESTRATOR_PRIVATE_CONTEXT|test-secret/);
+  assert.equal((await readdir(path.dirname(details.sessionFile))).length, 2);
+  assert.equal(app.requests.length, 5);
+});
+
+test("failed and empty planner reports arrive as failed wait results", TIMEOUT, async (t) => {
+  for (const scenario of ["provider failure", "empty report"] as const) {
+    await t.test(scenario, async (t) => {
+      const app = await fixture(t, (request) => {
+        if (JSON.stringify(request.messages).includes("You are a planning agent")) {
+          return scenario === "provider failure"
+            ? { error: "Planner authentication rejected", status: 401 }
+            : { text: "" };
+        }
+        const context = JSON.stringify(request.messages);
+        if (!request.messages.some((message) => message.role === "tool")) {
+          return { tool: "spawn_agent", args: { role: "planner", assignment: "Investigate the project" } };
+        }
+        if (context.includes("failed:")) {
+          return { text: "The planner failed; its findings are unavailable." };
+        }
+        return { tool: "wait_for_agents", args: {} };
+      });
+      const runtime = await app.runtime();
+      const orchestrator = await app.orchestratorFor(runtime);
+      await orchestrator.prompt("Request a planner investigation");
+      const collected = orchestrator.messages.find((message) => message.role === "toolResult" && message.toolName === "wait_for_agents");
+      assert.ok(collected?.role === "toolResult");
+      assert.equal(collected.isError, true);
+      assert.match(JSON.stringify(collected.content), scenario === "provider failure"
+        ? /Planner authentication rejected/
+        : /returned an empty answer/);
+      const details = collected.details as { sessionFile: string };
+      assert.ok(await readFile(details.sessionFile, "utf8"));
+      assert.equal(app.requests.length, 4);
+    });
+  }
+});
+
+test("aborting the orchestrator stops its wait, and dispose aborts live agents", TIMEOUT, async (t) => {
+  let notifyPlanner!: () => void;
+  const plannerStarted = new Promise<void>((resolve) => { notifyPlanner = resolve; });
+  const app = await fixture(t, (request) => {
+    if (JSON.stringify(request.messages).includes("You are a planning agent")) {
+      notifyPlanner();
+      return { hang: true };
+    }
+    if (!request.messages.some((message) => message.role === "tool")) {
+      return { tool: "spawn_agent", args: { role: "planner", assignment: "Wait for the planner model" } };
+    }
+    return { tool: "wait_for_agents", args: {} };
+  });
+  const runtime = await app.runtime();
+  const orchestrator = await app.orchestratorFor(runtime);
+  const work = orchestrator.prompt("Start a planner").catch((error: unknown) => error);
+  await plannerStarted;
+  await orchestrator.abort();
+  await work;
+  assert.equal(orchestrator.isIdle, true);
+  await runtime.dispose();
+  const directory = path.dirname(orchestrator.sessionFile!);
+  const files = await readdir(directory);
+  assert.equal(files.length, 2);
+  const plannerFile = files.map((file) => path.join(directory, file)).find((file) => file !== orchestrator.sessionFile);
+  assert.ok(plannerFile);
+  const history = SessionManager.open(plannerFile).buildSessionContext().messages;
+  assert.ok(history.some((message) => message.role === "user" && JSON.stringify(message).includes("Wait for the planner model")));
+  const last = history.at(-1);
+  assert.ok(last?.role === "assistant");
+  assert.equal(last.stopReason, "aborted");
+  assert.equal(app.requests.length, 3);
+  const checkpoint = JSON.parse(await readFile(path.join(runtime.runDirectory, "run.json"), "utf8"));
+  const [interrupted] = checkpoint.agents;
+  assert.equal(interrupted.status, "interrupted");
+  assert.ok(interrupted.sessionFile);
+});
+
+test("the runtime rejects spawning an orchestrator, an empty assignment, or a disabled role", TIMEOUT, async (t) => {
+  const app = await fixture(t, () => { throw new Error("Invalid spawns must not call the model"); });
+  const runtime = await app.runtime();
+  await assert.rejects(runtime.spawn("orchestrator", "Do everything"), /cannot spawn another orchestrator/);
+  await assert.rejects(runtime.spawn("planner", "   "), /must not be empty/);
+  await assert.rejects(runtime.spawn("executor", "Edit a file"), /Only orchestrator and planner sessions are enabled/);
+  assert.equal(app.requests.length, 0);
+});
+
+test("a planner's question reaches the orchestrator and its answer resumes the planner", TIMEOUT, async (t) => {
+  const app = await fixture(t, (request) => {
+    const context = JSON.stringify(request.messages);
+    if (context.includes("You are a planning agent")) {
+      assert.deepEqual(request.tools.map((tool) => tool.function.name).sort(), ["ask_orchestrator", "find", "grep", "ls", "read"]);
+      if (context.includes("/api/v2/items")) {
+        assert.match(context, /Yes: use \/api\/v2\/items/);
+        return { text: "Planner plan: use the versioned endpoint the orchestrator confirmed." };
+      }
+      return { tool: "ask_orchestrator", args: { question: "Should the endpoint be versioned?" } };
+    }
+    if (!request.messages.some((message) => message.role === "tool")) {
+      return { tool: "spawn_agent", args: { role: "planner", assignment: "Propose the interface" } };
+    }
+    if (context.includes("Answered agent-1.")) {
+      if (context.includes("settled:")) return { text: "The planner proposed the versioned endpoint." };
+      if (context.includes("failed:")) return { text: "The planner failed after its question was answered." };
+      return { tool: "wait_for_agents", args: {} };
+    }
+    if (context.includes("asks:")) {
+      assert.match(context, /Should the endpoint be versioned\?/);
+      return { tool: "answer_worker", args: { agentId: "agent-1", answer: "Yes: use /api/v2/items." } };
+    }
+    return { tool: "wait_for_agents", args: {} };
+  });
+  const runtime = await app.runtime();
+  const orchestrator = await app.orchestratorFor(runtime);
+  await orchestrator.prompt("Commission an interface plan.");
+  const waits = toolResults(orchestrator, "wait_for_agents");
+  assert.equal(waits.length, 2);
+  assert.equal((waits[0]?.details as { type: string }).type, "question");
+  assert.match(JSON.stringify(waits[0]?.content), /asks: Should the endpoint be versioned\?/);
+  assert.equal((waits[1]?.details as { type: string }).type, "settled");
+  assert.match(JSON.stringify(waits[1]?.content), /versioned endpoint the orchestrator confirmed/);
+  const answered = orchestrator.messages.find((message) => message.role === "toolResult" && message.toolName === "answer_worker");
+  assert.ok(answered?.role === "toolResult");
+  assert.match(JSON.stringify(answered.content), /Answered agent-1/);
+  assert.equal(orchestrator.getLastAssistantText(), "The planner proposed the versioned endpoint.");
+  assert.equal(app.requests.length, 7);
+  const checkpoint = JSON.parse(await readFile(path.join(runtime.runDirectory, "run.json"), "utf8"));
+  assert.equal(checkpoint.version, 1);
+  assert.equal(checkpoint.cwd, app.cwd);
+  assert.equal(checkpoint.modelsFile, app.modelsFile);
+  assert.equal(checkpoint.agents.length, 1);
+  const [agent] = checkpoint.agents;
+  assert.equal(agent.id, "agent-1");
+  assert.equal(agent.role, "planner");
+  assert.equal(agent.assignment, "Propose the interface");
+  assert.equal(agent.status, "settled");
+  assert.equal(agent.question, "Should the endpoint be versioned?");
+  assert.equal(agent.answer, "Yes: use /api/v2/items.");
+  assert.match(agent.report, /versioned endpoint/);
+  assert.ok(agent.sessionFile);
+  await runtime.dispose();
+  const resumed = await app.resume(runtime);
+  assert.match(resumed.summary, /agent-1 \(planner\) settled/);
+  assert.match(resumed.summary, /versioned endpoint/);
+  await assert.rejects(resumed.runtime.resumeAgent("agent-1"), /not available to resume/);
+});
+
+test("an unanswered question produces a pause notification", TIMEOUT, async (t) => {
+  const app = await fixture(t, (request) => {
+    const context = JSON.stringify(request.messages);
+    if (context.includes("You are a planning agent")) {
+      return { tool: "ask_orchestrator", args: { question: "Which file should I change?" } };
+    }
+    if (!request.messages.some((message) => message.role === "tool")) {
+      return { tool: "spawn_agent", args: { role: "planner", assignment: "Ask before planning" } };
+    }
+    if (context.includes("is paused")) {
+      return { text: "The planner is paused; I will answer it later." };
+    }
+    return { tool: "wait_for_agents", args: {} };
+  });
+  const runtime = await app.runtime(50);
+  const orchestrator = await app.orchestratorFor(runtime);
+  await orchestrator.prompt("Spawn a planner and wait.");
+  const waits = toolResults(orchestrator, "wait_for_agents");
+  assert.equal(waits.length, 2);
+  assert.equal((waits[0]?.details as { type: string }).type, "question");
+  assert.equal((waits[1]?.details as { type: string }).type, "paused");
+  assert.match(JSON.stringify(waits[1]?.content), /is paused/);
+  assert.equal(app.requests.length, 5);
+  const directory = path.dirname(orchestrator.sessionFile!);
+  const plannerFile = (await readdir(directory)).map((file) => path.join(directory, file)).find((file) => file !== orchestrator.sessionFile);
+  assert.ok(plannerFile);
+  const messages = SessionManager.open(plannerFile).buildSessionContext().messages;
+  const ask = messages.at(-1);
+  assert.ok(ask?.role === "assistant");
+  assert.ok(ask.content.some((part) => part.type === "toolCall" && part.name === "ask_orchestrator"));
+  assert.ok(!messages.some((message) => message.role === "toolResult" && message.toolName === "ask_orchestrator"));
+  const checkpoint = JSON.parse(await readFile(path.join(runtime.runDirectory, "run.json"), "utf8"));
+  const [pausedAgent] = checkpoint.agents;
+  assert.equal(pausedAgent.status, "waiting");
+  assert.equal(pausedAgent.question, "Which file should I change?");
+  assert.equal(pausedAgent.answer, undefined);
+});
+
+test("questions are pushed to an idle orchestrator as messages", TIMEOUT, async (t) => {
+  const app = await fixture(t, (request) => {
+    const context = JSON.stringify(request.messages);
+    if (context.includes("You are a planning agent")) {
+      return { tool: "ask_orchestrator", args: { question: "Which directory holds the sources?" } };
+    }
+    if (!request.messages.some((message) => message.role === "tool")) {
+      return { tool: "spawn_agent", args: { role: "planner", assignment: "Find the sources" } };
+    }
+    return { text: "Noted the planner message." };
+  });
+  const runtime = await app.runtime(50);
+  const orchestrator = await app.orchestratorFor(runtime);
+  runtime.setNotifier((text) => {
+    void orchestrator.sendUserMessage(text, { deliverAs: "followUp" }).catch(() => {});
+  });
+  await orchestrator.prompt("Spawn a planner.");
+  await waitFor(() => app.requests.length === 5);
+  await orchestrator.waitForIdle();
+  const injected = orchestrator.messages.filter((message) => message.role === "user" && JSON.stringify(message).includes("planner"));
+  assert.ok(injected.some((message) => JSON.stringify(message).includes("Which directory holds the sources?")));
+  assert.ok(injected.some((message) => JSON.stringify(message).includes("is paused")));
+  assert.equal(orchestrator.getLastAssistantText(), "Noted the planner message.");
+});
+
+test("resume marks live agents interrupted and continues their conversation", TIMEOUT, async (t) => {
+  let plannerCalls = 0;
+  const app = await fixture(t, (request) => {
+    if (JSON.stringify(request.messages).includes("You are a planning agent")) {
+      plannerCalls += 1;
+      return plannerCalls === 1 ? { hang: true } : { text: "Recovered planner report after resume." };
+    }
+    if (!request.messages.some((message) => message.role === "tool")) {
+      return { tool: "spawn_agent", args: { role: "planner", assignment: "Investigate the saved run" } };
+    }
+    return { tool: "wait_for_agents", args: {} };
+  });
+  const runtime = await app.runtime();
+  const orchestrator = await app.orchestratorFor(runtime);
+  const work = orchestrator.prompt("Start a planner").catch((error: unknown) => error);
+  await waitFor(() => app.requests.length >= 2);
+  await orchestrator.abort();
+  await work;
+  await runtime.dispose();
+
+  const runFile = path.join(runtime.runDirectory, "run.json");
+  const before = JSON.parse(await readFile(runFile, "utf8"));
+  assert.equal(before.agents[0].status, "interrupted");
+  assert.ok(before.agents[0].sessionFile);
+
+  const resumed = await app.resume(runtime);
+  assert.match(resumed.summary, /agent-1 \(planner\) interrupted/);
+  assert.match(resumed.summary, /Investigate the saved run/);
+
+  await resumed.runtime.resumeAgent("agent-1", "Report what you have so far.");
+  const event = await resumed.runtime.next();
+  assert.ok(event?.type === "settled");
+  assert.match(event.report, /Recovered planner report after resume/);
+
+  const history = await readFile(before.agents[0].sessionFile, "utf8");
+  assert.match(history, /Investigate the saved run/);
+  assert.match(history, /Report what you have so far/);
+  assert.match(history, /Recovered planner report after resume/);
+  const after = JSON.parse(await readFile(runFile, "utf8"));
+  assert.equal(after.agents[0].status, "settled");
+  assert.match(after.agents[0].report, /Recovered planner report/);
+});
+
+test("resume rejects missing, malformed, or unsupported run.json", TIMEOUT, async (t) => {
+  const app = await fixture(t, () => { throw new Error("Resume validation must not call the model"); });
+  const { roles } = await loadAgentConfig(app.agentsFile);
+  const base = { cwd: app.cwd, modelsFile: app.modelsFile, roles };
+  const missing = await mkdtemp(path.join(app.cwd, "run-"));
+  await assert.rejects(AgentRuntime.resume({ ...base, runDirectory: missing }), /No run.json found/);
+  const malformed = await mkdtemp(path.join(app.cwd, "run-"));
+  await writeFile(path.join(malformed, "run.json"), "{ not json");
+  await assert.rejects(AgentRuntime.resume({ ...base, runDirectory: malformed }), /not valid JSON/);
+  const unsupported = await mkdtemp(path.join(app.cwd, "run-"));
+  await writeFile(path.join(unsupported, "run.json"), JSON.stringify({ version: 99 }));
+  await assert.rejects(AgentRuntime.resume({ ...base, runDirectory: unsupported }), /Unsupported run.json version: 99/);
+  const invalidAgent = await mkdtemp(path.join(app.cwd, "run-"));
+  await writeFile(path.join(invalidAgent, "run.json"), JSON.stringify({
+    version: 1, runId: "run-1", cwd: app.cwd, modelsFile: app.modelsFile,
+    agents: [{ id: "agent-1", role: "planner", assignment: "x", status: "unknown" }],
+  }));
+  await assert.rejects(AgentRuntime.resume({ ...base, runDirectory: invalidAgent }), /Invalid run.json/);
+  assert.equal(app.requests.length, 0);
 });
 
 test("a transient provider failure is retried successfully", TIMEOUT, async (t) => {

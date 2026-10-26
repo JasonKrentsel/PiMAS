@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
-import { createOrchestratorSession } from "./agent.js";
+import { createRoleSession } from "./agent.js";
 import { loadAgentConfig } from "./agent-config.js";
 
 try {
@@ -48,10 +48,11 @@ async function runRequest(prompt: string, modelsFile: string, agentsFile: string
   try {
     await mkdir(sessionDirectory, { recursive: true });
     const sessionManager = SessionManager.create(cwd, sessionDirectory);
-    session = await createOrchestratorSession({
+    session = await createRoleSession({
       cwd,
       modelsFile,
-      profile: roles.orchestrator,
+      role: "orchestrator",
+      roles,
       sessionManager,
     });
     if (interrupted) return;

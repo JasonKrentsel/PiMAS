@@ -8,20 +8,27 @@ import {
   type AgentSession,
   type ResourceLoader,
   type SessionManager,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { AgentProfile } from "./agent-config.js";
+import type { AgentConfig, AgentRole } from "./agent-config.js";
 
-interface OrchestratorOptions {
+interface RoleSessionOptions {
   cwd: string;
   modelsFile: string;
-  profile: AgentProfile;
+  role: AgentRole;
+  roles: AgentConfig["roles"];
   sessionManager: SessionManager;
+  customTools?: ToolDefinition[];
 }
 
-/** The caller owns prompting, local history, and abort/dispose of this Pi session. */
-export async function createOrchestratorSession(options: OrchestratorOptions): Promise<AgentSession> {
-  const systemPrompt = (await readFile(options.profile.systemPrompt, "utf8")).trim();
-  if (!systemPrompt) throw new Error(`System prompt is empty: ${options.profile.systemPrompt}`);
+/** The caller owns prompting, local history, and abort/dispose of each Pi session. */
+export async function createRoleSession(options: RoleSessionOptions): Promise<AgentSession> {
+  if (options.role !== "orchestrator" && options.role !== "planner") {
+    throw new Error("Only orchestrator and planner sessions are enabled; execution and review are not implemented yet.");
+  }
+  const profile = options.roles[options.role];
+  const systemPrompt = (await readFile(profile.systemPrompt, "utf8")).trim();
+  if (!systemPrompt) throw new Error(`System prompt is empty: ${profile.systemPrompt}`);
 
   // Pi treats a missing models file as optional; this application requires it.
   await access(options.modelsFile);
@@ -36,9 +43,9 @@ export async function createOrchestratorSession(options: OrchestratorOptions): P
     // Do not echo parser diagnostics that might contain credential values.
     throw new Error(`Invalid models configuration: ${options.modelsFile}. Check JSON syntax and Pi's models schema.`);
   }
-  const model = modelRuntime.getModel(options.profile.provider, options.profile.model);
+  const model = modelRuntime.getModel(profile.provider, profile.model);
   if (!model) {
-    throw new Error(`Model ${options.profile.provider}/${options.profile.model} is unavailable in ${options.modelsFile}`);
+    throw new Error(`Model ${profile.provider}/${profile.model} is unavailable in ${options.modelsFile}`);
   }
 
   const settingsManager = SettingsManager.inMemory({
@@ -65,12 +72,14 @@ export async function createOrchestratorSession(options: OrchestratorOptions): P
     reload: async () => {},
   };
 
+  const customTools = options.customTools ?? [];
   const { session } = await createAgentSession({
     cwd: options.cwd,
     modelRuntime,
     model,
-    thinkingLevel: options.profile.thinkingLevel,
-    tools: ["read", "grep", "find", "ls"],
+    thinkingLevel: profile.thinkingLevel,
+    tools: ["read", "grep", "find", "ls", ...customTools.map((tool) => tool.name)],
+    customTools,
     sessionManager: options.sessionManager,
     settingsManager,
     resourceLoader,
