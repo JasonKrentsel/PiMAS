@@ -1,12 +1,12 @@
 import { access, readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
-  createExtensionRuntime,
+  DefaultResourceLoader,
   ModelRuntime,
   SettingsManager,
   type AgentSession,
-  type ResourceLoader,
   type SessionManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -54,21 +54,27 @@ export async function createRoleSession(options: RoleSessionOptions): Promise<Ag
     enableAnalytics: false,
   });
 
-  // Explicit resources keep personal/project extensions and settings out of this baseline.
-  const extensions = { extensions: [], errors: [], runtime: createExtensionRuntime() };
-  const resourceLoader: ResourceLoader = {
-    getExtensions: () => extensions,
-    getSkills: () => ({ skills: [], diagnostics: [] }),
-    getPrompts: () => ({ prompts: [], diagnostics: [] }),
-    getThemes: () => ({ themes: [], diagnostics: [] }),
-    getAgentsFiles: () => ({ agentsFiles: [] }),
-    getSystemPrompt: () => systemPrompt,
-    getSystemPromptSource: () => undefined,
-    getAppendSystemPrompt: () => [],
-    getAppendSystemPromptSources: () => [],
-    extendResources: () => {},
-    reload: async () => {},
-  };
+  // Pi loads only these explicit extensions; no personal/project resources or settings.
+  const resourceLoader = new DefaultResourceLoader({
+    cwd: options.cwd,
+    agentDir: dirname(resolve(options.modelsFile)),
+    settingsManager,
+    // In Pi, noExtensions disables discovery, not additionalExtensionPaths.
+    noExtensions: true,
+    additionalExtensionPaths: profile.extensions ?? [],
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    systemPrompt,
+    systemPromptOverride: () => systemPrompt,
+    appendSystemPrompt: [],
+  });
+  await resourceLoader.reload();
+  if (resourceLoader.getExtensions().errors.length > 0) {
+    // Do not echo extension diagnostics that might include sensitive source/config values.
+    throw new Error(`Failed to load ${options.role} extensions. Check the configured paths and extension modules.`);
+  }
 
   const suppliedTools = options.customTools ?? [];
   const nativeNames = new Set(["read", "grep", "find", "ls", "write", "edit", "bash", "powershell"]);
@@ -90,5 +96,14 @@ export async function createRoleSession(options: RoleSessionOptions): Promise<Ag
     settingsManager,
     resourceLoader,
   });
-  return session;
+  try {
+    await session.bindExtensions({
+      mode: "print",
+      onError: (error) => console.error("Pi extension error:", error),
+    });
+    return session;
+  } catch (error) {
+    session.dispose();
+    throw error;
+  }
 }

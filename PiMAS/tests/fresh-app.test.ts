@@ -296,6 +296,95 @@ test("role configuration selects the provider, thinking level, and custom Markdo
   assert.equal(app.requests.length, 1);
 });
 
+test("native planner extension changes read results through the resource loader only for its role", TIMEOUT, async (t) => {
+  const app = await fixture(t, (request, count) => {
+    if (count % 2 === 1) return { tool: "read", args: { path: "notes.txt" } };
+    const result = JSON.stringify(request.messages.filter((message) => message.role === "tool"));
+    assert.match(result, /ORIGINAL_FILE_EVIDENCE/);
+    if (count === 2) assert.match(result, /ROBUSTNESS TEST/);
+    else assert.doesNotMatch(result, /ROBUSTNESS TEST/);
+    return { text: "Read the available evidence." };
+  });
+  await writeFile(path.join(app.cwd, "notes.txt"), "ORIGINAL_FILE_EVIDENCE");
+  for (const directory of [path.join(app.cwd, ".pi", "extensions"), path.join(app.cwd, "extensions")]) {
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, "ambient.ts"), 'export default function () { throw new Error("AMBIENT_EXTENSION_EXECUTED"); }');
+  }
+  const agents = JSON.parse(await readFile(app.agentsFile, "utf8"));
+  agents.roles.planner.extensions = [path.resolve("src/extensions/tool-result-injection.ts")];
+  await writeFile(app.agentsFile, JSON.stringify(agents));
+  const planner = await app.session("planner");
+  await planner.prompt("Read notes.txt.");
+  assert.match(JSON.stringify(toolResults(planner, "read")), /ROBUSTNESS TEST/);
+  assert.match(await readFile(planner.sessionFile!, "utf8"), /ROBUSTNESS TEST/);
+  const reviewer = await app.session("reviewer");
+  await reviewer.prompt("Read notes.txt.");
+  assert.doesNotMatch(JSON.stringify(toolResults(reviewer, "read")), /ROBUSTNESS TEST/);
+  assert.equal(await readFile(path.join(app.cwd, "notes.txt"), "utf8"), "ORIGINAL_FILE_EVIDENCE");
+  assert.equal(app.requests.length, 4);
+});
+
+test("native extension factories and startup attach separately to spawned and reopened workers", TIMEOUT, async (t) => {
+  const app = await fixture(t, (request, count) => {
+    if (count % 2 === 1) return { tool: "read", args: { path: "notes.txt" } };
+    const result = request.messages.filter((message) => message.role === "tool").at(-1);
+    assert.match(JSON.stringify(result), /SESSION_READ_1/);
+    assert.doesNotMatch(JSON.stringify(result), /SESSION_READ_2/);
+    return { text: "Planner inspected the file." };
+  });
+  await writeFile(path.join(app.cwd, "notes.txt"), "Shared evidence");
+  await writeFile(path.join(app.cwd, "session-extension.ts"), `export default function (pi) {
+    let reads = 0;
+    pi.on("session_start", () => { pi.appendEntry("native-extension-started", {}); });
+    pi.on("tool_result", (event) => {
+      if (event.toolName !== "read" || event.isError) return;
+      return { content: [...event.content, { type: "text", text: "SESSION_READ_" + (++reads) }] };
+    });
+  }`);
+  const agents = JSON.parse(await readFile(app.agentsFile, "utf8"));
+  agents.roles.planner.extensions = ["session-extension.ts"];
+  await writeFile(app.agentsFile, JSON.stringify(agents));
+  const runtime = await app.runtime();
+  const first = await runtime.spawn("planner", "Read notes.txt and report.");
+  assert.equal((await runtime.next(first))?.type, "settled");
+  const second = await runtime.spawn("planner", "Independently read notes.txt and report.");
+  assert.equal((await runtime.next(second))?.type, "settled");
+  await runtime.dispose();
+  const file = path.join(runtime.runDirectory, "run.json");
+  const checkpoint = JSON.parse(await readFile(file, "utf8"));
+  for (const entry of checkpoint.agents) {
+    assert.match(await readFile(entry.sessionFile, "utf8"), /native-extension-started/);
+  }
+  checkpoint.agents[0].status = "interrupted";
+  await writeFile(file, JSON.stringify(checkpoint));
+  const resumed = await app.resume(runtime);
+  await resumed.runtime.resumeAgent(first, "Read notes.txt again and report.");
+  assert.equal((await resumed.runtime.next(first))?.type, "settled");
+  assert.equal(app.requests.length, 6);
+  const history = await readFile(checkpoint.agents[0].sessionFile, "utf8");
+  const starts = history.split("\n").filter((line) => line && JSON.parse(line).customType === "native-extension-started");
+  assert.equal(starts.length, 2, "Exactly one startup for each session instance");
+});
+
+test("missing and broken explicitly configured extensions fail before inference", TIMEOUT, async (t) => {
+  const app = await fixture(t, () => { throw new Error("Failed extension setup must not call the model"); });
+  const agents = JSON.parse(await readFile(app.agentsFile, "utf8"));
+  for (const filename of ["missing-extension.ts", "broken-extension.ts"]) {
+    if (filename.startsWith("broken")) {
+      await writeFile(path.join(app.cwd, filename), 'export default function () { throw new Error("SENSITIVE_EXTENSION_VALUE"); }');
+    }
+    agents.roles.planner.extensions = [filename];
+    await writeFile(app.agentsFile, JSON.stringify(agents));
+    await assert.rejects(app.session("planner"), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Failed to load planner extensions/);
+      assert.doesNotMatch(error.message, /SENSITIVE_EXTENSION_VALUE/);
+      return true;
+    });
+  }
+  assert.equal(app.requests.length, 0);
+});
+
 test("CLI reports when model capabilities clamp the requested thinking level", TIMEOUT, async (t) => {
   const app = await fixture(t, () => ({ text: "Thinking is unavailable on this model." }));
   const agents = JSON.parse(await readFile(app.agentsFile, "utf8"));

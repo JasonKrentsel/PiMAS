@@ -10,6 +10,7 @@ export interface AgentProfile {
   model: string;
   thinkingLevel: AgentSession["thinkingLevel"];
   systemPrompt: string;
+  extensions?: string[];
 }
 
 export interface AgentConfig {
@@ -20,7 +21,7 @@ const THINKING_LEVELS: readonly AgentProfile["thinkingLevel"][] = [
   "off", "minimal", "low", "medium", "high", "xhigh", "max",
 ];
 
-/** Role preferences only: tool permissions are enforced by the application. */
+/** Explicit role profiles. Extensions are trusted executable code, not permission settings. */
 export async function loadAgentConfig(file: string): Promise<AgentConfig> {
   const configFile = resolve(file);
   const content = await readFile(configFile, "utf8");
@@ -48,7 +49,7 @@ export async function loadAgentConfig(file: string): Promise<AgentConfig> {
 function profile(value: unknown, role: AgentRole, directory: string): AgentProfile {
   const label = `roles.${role}`;
   const entry = object(value, label);
-  checkFields(entry, ["provider", "model", "thinkingLevel", "systemPrompt"], label);
+  checkFields(entry, ["provider", "model", "thinkingLevel", "systemPrompt", "extensions"], label);
   const thinkingLevel = string(entry.thinkingLevel, `${label}.thinkingLevel`);
   if (!THINKING_LEVELS.includes(thinkingLevel as AgentProfile["thinkingLevel"])) {
     throw new Error(`${label}.thinkingLevel must be one of: ${THINKING_LEVELS.join(", ")}`);
@@ -58,7 +59,14 @@ function profile(value: unknown, role: AgentRole, directory: string): AgentProfi
     model: string(entry.model, `${label}.model`),
     thinkingLevel: thinkingLevel as AgentProfile["thinkingLevel"],
     systemPrompt: resolve(directory, string(entry.systemPrompt, `${label}.systemPrompt`)),
+    extensions: extensionPaths(entry.extensions, `${label}.extensions`, directory),
   };
+}
+
+function extensionPaths(value: unknown, label: string, directory: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array of paths`);
+  return value.map((entry, index) => resolve(directory, string(entry, `${label}[${index}]`)));
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {

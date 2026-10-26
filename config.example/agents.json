@@ -4,25 +4,29 @@
       "provider": "local",
       "model": "YOUR_MODEL_ID",
       "thinkingLevel": "off",
-      "systemPrompt": "/opt/pimas/prompts/orchestrator.md"
+      "systemPrompt": "/opt/pimas/prompts/orchestrator.md",
+      "extensions": []
     },
     "planner": {
       "provider": "local",
       "model": "YOUR_MODEL_ID",
       "thinkingLevel": "off",
-      "systemPrompt": "/opt/pimas/prompts/planner.md"
+      "systemPrompt": "/opt/pimas/prompts/planner.md",
+      "extensions": []
     },
     "executor": {
       "provider": "local",
       "model": "YOUR_MODEL_ID",
       "thinkingLevel": "off",
-      "systemPrompt": "/opt/pimas/prompts/executor.md"
+      "systemPrompt": "/opt/pimas/prompts/executor.md",
+      "extensions": []
     },
     "reviewer": {
       "provider": "local",
       "model": "YOUR_MODEL_ID",
       "thinkingLevel": "off",
-      "systemPrompt": "/opt/pimas/prompts/reviewer.md"
+      "systemPrompt": "/opt/pimas/prompts/reviewer.md",
+      "extensions": []
     }
   }
 }

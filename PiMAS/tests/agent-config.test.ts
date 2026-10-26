@@ -24,6 +24,7 @@ test("the root example defines four roles with existing Markdown prompts", async
     assert.equal(config.roles[role].provider, "pimas");
     assert.equal(config.roles[role].model, "local-model");
     assert.equal(config.roles[role].thinkingLevel, "off");
+    assert.deepEqual(config.roles[role].extensions, []);
     assert.ok((await readFile(config.roles[role].systemPrompt, "utf8")).trim());
   }
 });
@@ -44,6 +45,27 @@ test("roles have independent preferences and prompts resolve beside their config
   assert.equal(roles.reviewer.thinkingLevel, "max");
   assert.equal(roles.orchestrator.thinkingLevel, "off");
   assert.equal(roles.planner.systemPrompt, path.join(app.directory, "prompts", "planner.md"));
+});
+
+test("extension paths resolve beside the config and remain role-specific", async (t) => {
+  const app = await fixture(t);
+  const absolute = path.join(app.directory, "absolute-extension.ts");
+  app.config.roles.planner.extensions = ["extensions/inject.ts", absolute];
+  app.config.roles.executor.extensions = [];
+  await app.save();
+  const { roles } = await loadAgentConfig(app.file);
+  assert.deepEqual(roles.planner.extensions, [path.join(app.directory, "extensions", "inject.ts"), absolute]);
+  assert.deepEqual(roles.executor.extensions, []);
+  assert.deepEqual(roles.reviewer.extensions, []);
+});
+
+test("invalid extension lists are rejected", async (t) => {
+  const app = await fixture(t);
+  for (const value of [null, "inject.ts", {}, [""], [" "], [123]]) {
+    app.config.roles.planner.extensions = value;
+    await app.save();
+    await assert.rejects(loadAgentConfig(app.file), /roles\.planner\.extensions/);
+  }
 });
 
 test("missing roles and empty required fields are errors", async (t) => {
