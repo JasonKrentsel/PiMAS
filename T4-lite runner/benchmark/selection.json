@@ -1,0 +1,349 @@
+{
+  "parent_run_id": "run-20261021T230611Z-279c",
+  "parent_state_sha256": "e989231ca22e5d638321be9f04d6ad1699fd9ea12f03ebaaaa34751805e7cbb7",
+  "seed": "terminal-bench-4.0-lite-v1",
+  "quotas": {
+    "Software": 9,
+    "Science": 7,
+    "Operations": 3,
+    "ML": 2,
+    "Media": 2,
+    "Security": 1
+  },
+  "candidates": [
+    {
+      "id": "risk-scorer-replay",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "ML",
+      "rank": "eb68caa49523cdc03aeb1d66bec855d09fa68b6e43c56a57389519ffc8c0fa20"
+    },
+    {
+      "id": "rs-archive-clone",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "88008a819b16d1e80a20d153ff4b0b5b151b76156ba5fa6c88986c4eb17d25da"
+    },
+    {
+      "id": "ontology-kg-querying",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "36c770a46c62533b7c100735777e462d878cf7c7bd2c93260333b5dfc1ae1df5"
+    },
+    {
+      "id": "html-js-filter",
+      "status": "Pass",
+      "quarantined": true,
+      "category": "Security",
+      "rank": "dc80737a0121e73a6449a199adec380beb0fac86b317c76505a0ebac12c1faea"
+    },
+    {
+      "id": "coq-block-bound",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Science",
+      "rank": "0d8b1b49b78026a3b21ee2c7251ca3099879f9d072155f94318d5a4140521acf"
+    },
+    {
+      "id": "glycan-ms2-elucidation",
+      "status": "Fail",
+      "quarantined": true,
+      "category": "Science",
+      "rank": "29df2bf0db94c03ee3ab3ad51a4bb86ff54b8b4d85c9b2e18989ef5e1f935fee"
+    },
+    {
+      "id": "heat-pump-warranty",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Operations",
+      "rank": "6ed6d451c7f626a6db305337b0c54a9b1a363c5c055136da779c3fee7b9c117d"
+    },
+    {
+      "id": "ks-solver-cpp",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Science",
+      "rank": "e73ff601b4af37e9a916f4c1613890473296404a3f169a282869adcf62f845e7"
+    },
+    {
+      "id": "atrx-vep-crispr",
+      "status": "Pass",
+      "quarantined": false,
+      "category": "Science",
+      "rank": "430d8640115482ee033df41d24e029a09c6340b84e9574998e58a1d5112aa088"
+    },
+    {
+      "id": "batched-eval-parity",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "ML",
+      "rank": "132d7746e50ffeaea222a8ad158628c7b530bc59b90e9a9cb39e64ae837279cc"
+    },
+    {
+      "id": "bun-sourcemap-leak",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "7a707dabfc719f71aedba8a8daa06583982e219c2e561a562f2df9a8bd0ec447"
+    },
+    {
+      "id": "cargo-flight-dispatch",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Operations",
+      "rank": "04ef34020d0eaeb24dc195d2aa11521f086e14b74aaaa290e3d0d6b9f2ab3507"
+    },
+    {
+      "id": "cumulative-layout-shift",
+      "status": "Fail",
+      "quarantined": true,
+      "category": "Software",
+      "rank": "97dff8e55da145485bb3c4e679f582ad40aebb525985080353f5e3b964d3448d"
+    },
+    {
+      "id": "data-anonymization",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "388c05f6465ef0a8d3867a0f008d4b8d8d05ff7850948baa558dc890e8e54a3b"
+    },
+    {
+      "id": "distributed-dedup",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "561ff6c58533af3610b845d627dde5df993d51c26b3c72a70221ae00efe6b9c9"
+    },
+    {
+      "id": "embedding-drift-monitor",
+      "status": "Pass",
+      "quarantined": false,
+      "category": "ML",
+      "rank": "a610e27ed4a98d78d53af41977dea333b918217429e0e3ad96be4a5525b6e95c"
+    },
+    {
+      "id": "fin-saccr-rwa",
+      "status": "Pass",
+      "quarantined": false,
+      "category": "Operations",
+      "rank": "58e0c12c720aa1964fd3258550155d6eddd720b7d339b824424719eae9bd0873"
+    },
+    {
+      "id": "foodstuff-beta-activity",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Science",
+      "rank": "13627e59cc9d4036441ee093d879f0d4dcbbf0fcb88273d6272ec61b851c08a4"
+    },
+    {
+      "id": "freecad-impeller",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Hardware",
+      "rank": "18e59f43464d6bd182d46f90b4d769647a63a39adf0a75f19d9ab9aaa58e7d94"
+    },
+    {
+      "id": "freecad-spring-clip",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Hardware",
+      "rank": "260e7ce2cb23f827acd8e00de775af162e1d32083fa13bc2cbc428cb3adb8a23"
+    },
+    {
+      "id": "gsea-proteomics",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Science",
+      "rank": "d15a68f6613949da489cc64b6bfe6aac98d9809289b51d8f10579b7e3b1728a1"
+    },
+    {
+      "id": "hof-topology-interpenetration",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Science",
+      "rank": "3ae46c7d395345206060fb45927f0eaf1605004c6613484f78b261255ef8719f"
+    },
+    {
+      "id": "intrastat-meldung",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Operations",
+      "rank": "bc80cb2310a4f83896f8fc393f50e720b55d31feba304de1906bc6fe8a1f1a17"
+    },
+    {
+      "id": "lake-temp-glm",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Science",
+      "rank": "e6a9bd532040d6c1bdf20f7e8670009e422c89cd67135d36ac55e9bbc76b455e"
+    },
+    {
+      "id": "layout-config-recreation",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Media",
+      "rank": "48af07f5b6879dfacd4b5f0a16690856551e0066523a3805dc619b8aec7f4ef6"
+    },
+    {
+      "id": "live-database-cutover",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "246c52689b067f377f66a308d78d4bc6db9f521f15921910eab187d152afdae3"
+    },
+    {
+      "id": "medical-claims-processing",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Operations",
+      "rank": "a17d8d73ed392dd21560836352c519beb6efe729b055c6a63f52c1c907f5133e"
+    },
+    {
+      "id": "music-harmony",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Media",
+      "rank": "c988bca61962230eec192cd46af24b1b4a4d3070b59d7728886b29ab3cc692e6"
+    },
+    {
+      "id": "mvcc-lsm-compaction",
+      "status": "Pass",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "4e6651bf941da6dc2fe1dae2fdb04debe30ee77f14136aac9887c49973f05c92"
+    },
+    {
+      "id": "nextjs-performance",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "dc73a2e83cadaa3165e53224031f44daab64a4ab31ef126429a0c127ed742e83"
+    },
+    {
+      "id": "payments-pipeline-fix",
+      "status": "Pass",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "124ad796516b1636a3df8a79bfccb4d6fe0a050393cb1670fb512b3bc6940fb4"
+    },
+    {
+      "id": "protein-autointerp-disulfide",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Science",
+      "rank": "6e7f8892655eac177cc96c1c4066a2fa53a0674c7e7cc9994242e90499c56c7f"
+    },
+    {
+      "id": "react-lead-form",
+      "status": "Pass",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "78b9de0ff7223270caaa567c517928d7294393e07cf5e86b87b9e0bef059234d"
+    },
+    {
+      "id": "roy-polymorph-cn",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Science",
+      "rank": "0606a1147dda3da94497def682396044506067a0fbea8d0b72b9ba4a2c85f7d1"
+    },
+    {
+      "id": "satb-audio-transcription",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Media",
+      "rank": "6199ddf4754108ae041bd7e2655ab6c3c287098447453c3afe912bbf7c9eb537"
+    },
+    {
+      "id": "session-window-debug",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "97c966be99932d08ba5d057bfa76964210eec9015cc4d433c09d96e7ff9b2720"
+    },
+    {
+      "id": "takens-embedding-lean",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Science",
+      "rank": "a74a778384bcccbb7aa1d44f8e626243afd4c3555fef05c55f446b9232b5bdf6"
+    },
+    {
+      "id": "telecom-entity-resolution",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "05b313048f770b8d2873dcde63185bdb07781e3993ab3b69c88023b63718f9b5"
+    },
+    {
+      "id": "uefi-bootkit",
+      "status": "Pass",
+      "quarantined": false,
+      "category": "Security",
+      "rank": "a87ff5a7382fea93ebde6a17f0b8a704eff7102494a3e77d80eb5974fd71eaa2"
+    },
+    {
+      "id": "vba-userform-port",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "d1528684877853d0a3a1b641a8daac59d605544f679f656b406392af5b857bf1"
+    },
+    {
+      "id": "vf2-speedup-networkx",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "b4dd8b3ffe909e032e05d0a45393da0d2b5abf21a9dbe6388775f172bcc83d30"
+    },
+    {
+      "id": "vllm-deepseek-streaming",
+      "status": "Fail",
+      "quarantined": false,
+      "category": "ML",
+      "rank": "3c6f6fd10f0e2d854e84fa7cfd17487f97c9084b30e7c9211c4f118877b429ff"
+    },
+    {
+      "id": "wal-recovery-ordering",
+      "status": "Pass",
+      "quarantined": false,
+      "category": "Software",
+      "rank": "836e3af596b8db389bd71c199e4d0a29d27db05f0841ebe48be1aa460bd69172"
+    },
+    {
+      "id": "wdm-design",
+      "status": "Pass",
+      "quarantined": false,
+      "category": "Science",
+      "rank": "05ece7e15fc2170b398ea094ea18278878b1f495881421e9e68e17ca13a12ca9"
+    }
+  ],
+  "selected": [
+    "telecom-entity-resolution",
+    "payments-pipeline-fix",
+    "live-database-cutover",
+    "ontology-kg-querying",
+    "data-anonymization",
+    "mvcc-lsm-compaction",
+    "distributed-dedup",
+    "react-lead-form",
+    "bun-sourcemap-leak",
+    "wdm-design",
+    "roy-polymorph-cn",
+    "coq-block-bound",
+    "foodstuff-beta-activity",
+    "hof-topology-interpenetration",
+    "atrx-vep-crispr",
+    "protein-autointerp-disulfide",
+    "cargo-flight-dispatch",
+    "fin-saccr-rwa",
+    "heat-pump-warranty",
+    "batched-eval-parity",
+    "vllm-deepseek-streaming",
+    "layout-config-recreation",
+    "satb-audio-transcription",
+    "uefi-bootkit"
+  ]
+}

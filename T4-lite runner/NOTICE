@@ -1,0 +1,6 @@
+T4-lite includes unmodified Terminal-Bench 4.0.0 task packages under tasks/ and copies of historical native verifier evidence under pilot/.
+Upstream dataset: terminal-bench/terminal-bench@4.0.0
+Project: https://github.com/harbor-framework/terminal-bench
+Task registry names and immutable refs are recorded in benchmark/manifest.json.
+All upstream attribution and benchmark canaries are retained. This project does not assert ownership of, or relicense, upstream task content. Refer to upstream terms for redistribution.
+Benchmark tasks, source solutions, hidden tests and historical evidence are evaluator material and must not be used as model training data.

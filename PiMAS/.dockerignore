@@ -1,0 +1,13 @@
+**
+!package.json
+!package-lock.json
+!src/
+!src/**
+!prompts/
+!prompts/**
+!agents.example.json
+!models.example.json
+!container/
+!container/**
+**/*.local.json
+**/.env*

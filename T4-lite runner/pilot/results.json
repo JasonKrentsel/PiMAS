@@ -1,0 +1,856 @@
+{
+  "schema_version": 1,
+  "kind": "historical_pilot",
+  "benchmark_sha256": "a77b5c413bab6ac45510df92638e000ee20455f6f728b483e59f6294193ee846",
+  "parent_run_id": "run-20261021T230611Z-279c",
+  "caveat": "Retrospective replay of selected latest attempts from a mixed-settings exploratory run; not a fresh standardized Lite evaluation. No model was run.",
+  "tasks": [
+    {
+      "task_id": "telecom-entity-resolution",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "fail",
+        "check-003": "fail",
+        "check-004": "fail",
+        "check-005": "fail",
+        "check-006": "fail",
+        "check-007": "fail",
+        "check-008": "fail",
+        "check-009": "fail",
+        "check-010": "fail"
+      },
+      "source_attempt": "telecom-entity-resolution__attempt01",
+      "source_result_sha256": "6cc1b22361bd05bcbc92368fd9c7da060402e66c8e623fb86fc8e8fc56ecc21d",
+      "seconds": 9520.004032373428,
+      "evidence": [
+        {
+          "path": "evidence/telecom-entity-resolution/ctrf.json",
+          "sha256": "edf8aa585695e11699a0ac6483754af2c467115636a0c9cd307883d41affc4cd"
+        },
+        {
+          "path": "evidence/telecom-entity-resolution/native-result.json",
+          "sha256": "6cc1b22361bd05bcbc92368fd9c7da060402e66c8e623fb86fc8e8fc56ecc21d"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "payments-pipeline-fix",
+      "status": "pass",
+      "reward": 1,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "pass"
+      },
+      "source_attempt": "payments-pipeline-fix__attempt01",
+      "source_result_sha256": "c287583b11d4090285c4fa59b6223cd6ef74a864aed7660a7f93e7688e58bd3d",
+      "seconds": 2373.2151260375977,
+      "evidence": [
+        {
+          "path": "evidence/payments-pipeline-fix/ctrf.json",
+          "sha256": "e53b17324d07078a7d9adbc71cf725ba7c5f373d572c6efa875e46a012062ea9"
+        },
+        {
+          "path": "evidence/payments-pipeline-fix/native-result.json",
+          "sha256": "c287583b11d4090285c4fa59b6223cd6ef74a864aed7660a7f93e7688e58bd3d"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "live-database-cutover",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "fail",
+        "check-003": "pass",
+        "check-004": "pass",
+        "check-005": "pass",
+        "check-006": "pass",
+        "check-007": "pass",
+        "check-008": "pass",
+        "check-009": "pass",
+        "check-010": "pass",
+        "check-011": "pass",
+        "check-012": "pass",
+        "check-013": "pass",
+        "check-014": "pass",
+        "check-015": "pass",
+        "check-016": "pass",
+        "check-017": "pass",
+        "check-018": "pass"
+      },
+      "source_attempt": "live-database-cutover__attempt01",
+      "source_result_sha256": "536745470fceb294844e03ff647855c5c8f47aaaa41a5200e19e1a38ffe68bc2",
+      "seconds": 5908.068358898163,
+      "evidence": [
+        {
+          "path": "evidence/live-database-cutover/ctrf.json",
+          "sha256": "1c20d357fd6a08f23a64709b59a501d5894944b8c908b7988b70cc381b8827a8"
+        },
+        {
+          "path": "evidence/live-database-cutover/native-result.json",
+          "sha256": "536745470fceb294844e03ff647855c5c8f47aaaa41a5200e19e1a38ffe68bc2"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "ontology-kg-querying",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "pass",
+        "check-004": "pass",
+        "check-005": "pass",
+        "check-006": "pass",
+        "check-007": "pass",
+        "check-008": "pass",
+        "check-009": "pass",
+        "check-010": "fail",
+        "check-011": "fail"
+      },
+      "source_attempt": "ontology-kg-querying__attempt02",
+      "source_result_sha256": "980ef19da275e450ccf2b55f5fdd10c16c857edb562d4b81ee52112a90d907b0",
+      "seconds": 2126.1223435401917,
+      "evidence": [
+        {
+          "path": "evidence/ontology-kg-querying/ctrf.json",
+          "sha256": "35e4d5cd904f580560e231f3346b26f4f9ba8cd00e3f48c994a227eabaa522dd"
+        },
+        {
+          "path": "evidence/ontology-kg-querying/native-result.json",
+          "sha256": "980ef19da275e450ccf2b55f5fdd10c16c857edb562d4b81ee52112a90d907b0"
+        }
+      ],
+      "health": {
+        "health-001": "pass",
+        "health-002": "pass"
+      }
+    },
+    {
+      "task_id": "data-anonymization",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "fail",
+        "check-004": "fail",
+        "check-005": "pass",
+        "check-006": "pass",
+        "check-007": "pass",
+        "check-008": "pass"
+      },
+      "source_attempt": "data-anonymization__attempt01",
+      "source_result_sha256": "cf9c5c6593ec827deee6b0e0ec68de41cc9eaa42bf6a78bbd96e155f43caf89d",
+      "seconds": 3776.907374382019,
+      "evidence": [
+        {
+          "path": "evidence/data-anonymization/ctrf.json",
+          "sha256": "c85e89dc24989d8f6a7a5e1f758a924f8cc38b8485dd6eb40c6afa3a1a6d1eaf"
+        },
+        {
+          "path": "evidence/data-anonymization/native-result.json",
+          "sha256": "cf9c5c6593ec827deee6b0e0ec68de41cc9eaa42bf6a78bbd96e155f43caf89d"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "mvcc-lsm-compaction",
+      "status": "pass",
+      "reward": 1,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "pass",
+        "check-004": "pass",
+        "check-005": "pass",
+        "check-006": "pass",
+        "check-007": "pass",
+        "check-008": "pass",
+        "check-009": "pass",
+        "check-010": "pass",
+        "check-011": "pass",
+        "check-012": "pass",
+        "check-013": "pass"
+      },
+      "source_attempt": "mvcc-lsm-compaction__attempt01",
+      "source_result_sha256": "5367f10c0934792aef6b3bd5732e0f57e31e772af460077f553c18cef95149ec",
+      "seconds": 1062.562614440918,
+      "evidence": [
+        {
+          "path": "evidence/mvcc-lsm-compaction/ctrf.json",
+          "sha256": "9a611a31a82c3d06bdc11b81703c920944a36d0b89caa67273c718982edfd91f"
+        },
+        {
+          "path": "evidence/mvcc-lsm-compaction/native-result.json",
+          "sha256": "5367f10c0934792aef6b3bd5732e0f57e31e772af460077f553c18cef95149ec"
+        }
+      ],
+      "health": {
+        "health-001": "pass",
+        "health-002": "pass"
+      }
+    },
+    {
+      "task_id": "distributed-dedup",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "pass",
+        "check-004": "pass",
+        "check-005": "pass",
+        "check-006": "fail",
+        "check-007": "pass",
+        "check-008": "pass",
+        "check-009": "fail",
+        "check-010": "fail",
+        "check-011": "fail",
+        "check-012": "fail",
+        "check-013": "fail"
+      },
+      "source_attempt": "distributed-dedup__attempt01",
+      "source_result_sha256": "aa99fa7258687e647e629aabffb04e0b690dcc5be994d8028035a754705b4b68",
+      "seconds": 3925.167009115219,
+      "evidence": [
+        {
+          "path": "evidence/distributed-dedup/ctrf.json",
+          "sha256": "2a023043ae4a38e7c34604f85ecb9204a2c740468e3d3fd397eba1d3c921d5c0"
+        },
+        {
+          "path": "evidence/distributed-dedup/native-result.json",
+          "sha256": "aa99fa7258687e647e629aabffb04e0b690dcc5be994d8028035a754705b4b68"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "react-lead-form",
+      "status": "pass",
+      "reward": 1,
+      "checks": {
+        "check-001": "pass"
+      },
+      "source_attempt": "react-lead-form__attempt01",
+      "source_result_sha256": "ee155018358ce0f8688cb257010b13dbd112d0f6acff4a336ce3d0f5fa450d45",
+      "seconds": 1686.874718427658,
+      "evidence": [
+        {
+          "path": "evidence/react-lead-form/native-result.json",
+          "sha256": "ee155018358ce0f8688cb257010b13dbd112d0f6acff4a336ce3d0f5fa450d45"
+        },
+        {
+          "path": "evidence/react-lead-form/test-stdout.txt",
+          "sha256": "8078b565d54cba6e58e67c8a8cd4bf160622fc773a0502b221a4c10a694c5d6c"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "bun-sourcemap-leak",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "pass",
+        "check-004": "pass",
+        "check-005": "pass",
+        "check-006": "pass",
+        "check-007": "pass",
+        "check-008": "pass",
+        "check-009": "pass",
+        "check-010": "pass",
+        "check-011": "pass",
+        "check-012": "pass",
+        "check-013": "pass",
+        "check-014": "pass",
+        "check-015": "pass",
+        "check-016": "pass",
+        "check-017": "pass",
+        "check-018": "pass",
+        "check-019": "pass",
+        "check-020": "pass",
+        "check-021": "pass",
+        "check-022": "fail",
+        "check-023": "fail",
+        "check-024": "fail",
+        "check-025": "pass",
+        "check-026": "fail",
+        "check-027": "fail",
+        "check-028": "pass",
+        "check-029": "pass",
+        "check-030": "pass",
+        "check-031": "pass",
+        "check-032": "pass",
+        "check-033": "pass",
+        "check-034": "pass",
+        "check-035": "pass",
+        "check-036": "pass"
+      },
+      "source_attempt": "bun-sourcemap-leak__attempt01",
+      "source_result_sha256": "7c2bee52945d40de977f981c7101015710025236f051191bbb6c672a0ca554ce",
+      "seconds": 2662.051912546158,
+      "evidence": [
+        {
+          "path": "evidence/bun-sourcemap-leak/ctrf.json",
+          "sha256": "fae802dd941e8250d84950e87ac1dd031a64fa5092fb182de28e9ec91e7600f9"
+        },
+        {
+          "path": "evidence/bun-sourcemap-leak/native-result.json",
+          "sha256": "7c2bee52945d40de977f981c7101015710025236f051191bbb6c672a0ca554ce"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "wdm-design",
+      "status": "pass",
+      "reward": 1,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "pass",
+        "check-004": "pass",
+        "check-005": "pass",
+        "check-006": "pass"
+      },
+      "source_attempt": "wdm-design__attempt01",
+      "source_result_sha256": "20d38420c8ef3f225ddd16a096c4d1b7a2a432c915b286ff537e272ced3e2282",
+      "seconds": 3601.2694573402405,
+      "evidence": [
+        {
+          "path": "evidence/wdm-design/ctrf.json",
+          "sha256": "16b0fe2bf20015c098523a323614abb1301f308e587dea53a549576bd6f74bd8"
+        },
+        {
+          "path": "evidence/wdm-design/native-result.json",
+          "sha256": "20d38420c8ef3f225ddd16a096c4d1b7a2a432c915b286ff537e272ced3e2282"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "roy-polymorph-cn",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "fail"
+      },
+      "source_attempt": "roy-polymorph-cn__attempt01",
+      "source_result_sha256": "f8ccee28013a0fafa9f753e17153c9bdedbe4eabd6dbb87e91adb2dac3c8f84d",
+      "seconds": 1697.3254210948944,
+      "evidence": [
+        {
+          "path": "evidence/roy-polymorph-cn/ctrf.json",
+          "sha256": "737186675c223bc8df45178a34164f4c86f2300d5d93614ccf5f6705cfb0c622"
+        },
+        {
+          "path": "evidence/roy-polymorph-cn/native-result.json",
+          "sha256": "f8ccee28013a0fafa9f753e17153c9bdedbe4eabd6dbb87e91adb2dac3c8f84d"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "coq-block-bound",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "fail"
+      },
+      "source_attempt": "coq-block-bound__attempt02",
+      "source_result_sha256": "069769bb39adc707a1dab735df837964aca266a9eb65c999fbc9fa6876d987b4",
+      "seconds": 6982.768430233002,
+      "evidence": [
+        {
+          "path": "evidence/coq-block-bound/ctrf.json",
+          "sha256": "02e7155be071b54ea08df28dd98b42f3a1a6d3845ac0a135000a11f90e90e56d"
+        },
+        {
+          "path": "evidence/coq-block-bound/native-result.json",
+          "sha256": "069769bb39adc707a1dab735df837964aca266a9eb65c999fbc9fa6876d987b4"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "foodstuff-beta-activity",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "pass",
+        "check-004": "fail",
+        "check-005": "pass",
+        "check-006": "pass",
+        "check-007": "fail",
+        "check-008": "fail",
+        "check-009": "pass",
+        "check-010": "pass",
+        "check-011": "pass",
+        "check-012": "pass",
+        "check-013": "pass"
+      },
+      "source_attempt": "foodstuff-beta-activity__attempt01",
+      "source_result_sha256": "8e627b46265d6d76a64a7e7656c0dfaf6de09c40bcc485e0093c0b2ab91ae02c",
+      "seconds": 1654.2307350635529,
+      "evidence": [
+        {
+          "path": "evidence/foodstuff-beta-activity/ctrf.json",
+          "sha256": "78e7116564cd489dfc07bf7bf8ecb2f21f86c2f338047a4da91b8ece72a5bdb2"
+        },
+        {
+          "path": "evidence/foodstuff-beta-activity/native-result.json",
+          "sha256": "8e627b46265d6d76a64a7e7656c0dfaf6de09c40bcc485e0093c0b2ab91ae02c"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "hof-topology-interpenetration",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "pass",
+        "check-004": "pass",
+        "check-005": "pass",
+        "check-006": "pass",
+        "check-007": "pass",
+        "check-008": "pass",
+        "check-009": "pass",
+        "check-010": "pass",
+        "check-011": "fail",
+        "check-012": "fail",
+        "check-013": "fail",
+        "check-014": "fail",
+        "check-015": "fail",
+        "check-016": "fail",
+        "check-017": "fail",
+        "check-018": "fail",
+        "check-019": "pass",
+        "check-020": "pass",
+        "check-021": "fail",
+        "check-022": "pass",
+        "check-023": "fail",
+        "check-024": "pass",
+        "check-025": "fail",
+        "check-026": "fail",
+        "check-027": "fail",
+        "check-028": "fail",
+        "check-029": "fail",
+        "check-030": "fail",
+        "check-031": "fail",
+        "check-032": "fail",
+        "check-033": "fail",
+        "check-034": "fail",
+        "check-035": "fail",
+        "check-036": "fail",
+        "check-037": "fail",
+        "check-038": "fail"
+      },
+      "source_attempt": "hof-topology-interpenetration__attempt01",
+      "source_result_sha256": "ba1a7f61bcafe038561d476549a7fa102e5d51abdd35de689074d08b472ecc8b",
+      "seconds": 7269.306921720505,
+      "evidence": [
+        {
+          "path": "evidence/hof-topology-interpenetration/ctrf.json",
+          "sha256": "21c35388e2706fa54d2cc757e75ed7632cf675d5380231d3a2d9a76c9afa9a0f"
+        },
+        {
+          "path": "evidence/hof-topology-interpenetration/native-result.json",
+          "sha256": "ba1a7f61bcafe038561d476549a7fa102e5d51abdd35de689074d08b472ecc8b"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "atrx-vep-crispr",
+      "status": "pass",
+      "reward": 1,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "pass",
+        "check-004": "pass",
+        "check-005": "pass",
+        "check-006": "pass",
+        "check-007": "pass",
+        "check-008": "pass",
+        "check-009": "pass",
+        "check-010": "pass",
+        "check-011": "pass",
+        "check-012": "pass",
+        "check-013": "pass",
+        "check-014": "pass",
+        "check-015": "pass",
+        "check-016": "pass"
+      },
+      "source_attempt": "atrx-vep-crispr__attempt01",
+      "source_result_sha256": "38b7c48e9b717c050ef5e4310b990c6e6dcec8a78e17c7af8744924d7f614dee",
+      "seconds": 4342.448458909988,
+      "evidence": [
+        {
+          "path": "evidence/atrx-vep-crispr/ctrf.json",
+          "sha256": "d596e0b6b01dfc58def367ab7b419711f749384fda3b8924ba32c789f2e3c727"
+        },
+        {
+          "path": "evidence/atrx-vep-crispr/native-result.json",
+          "sha256": "38b7c48e9b717c050ef5e4310b990c6e6dcec8a78e17c7af8744924d7f614dee"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "protein-autointerp-disulfide",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "fail"
+      },
+      "source_attempt": "protein-autointerp-disulfide__attempt01",
+      "source_result_sha256": "62e858536a9f399d63dfe5f19915ab7ed0a94c6cc86b54da136ac55cee3e7936",
+      "seconds": 2531.466244459152,
+      "evidence": [
+        {
+          "path": "evidence/protein-autointerp-disulfide/ctrf.json",
+          "sha256": "bdfd52e67591cb88838dd7ca2f616eb8df919967f55b1fe51121c6f75c3890cf"
+        },
+        {
+          "path": "evidence/protein-autointerp-disulfide/native-result.json",
+          "sha256": "62e858536a9f399d63dfe5f19915ab7ed0a94c6cc86b54da136ac55cee3e7936"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "cargo-flight-dispatch",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "pass",
+        "check-004": "pass",
+        "check-005": "pass",
+        "check-006": "pass",
+        "check-007": "pass",
+        "check-008": "pass",
+        "check-009": "pass",
+        "check-010": "pass",
+        "check-011": "pass",
+        "check-012": "pass",
+        "check-013": "pass",
+        "check-014": "pass",
+        "check-015": "fail",
+        "check-016": "pass",
+        "check-017": "pass",
+        "check-018": "pass",
+        "check-019": "pass",
+        "check-020": "pass",
+        "check-021": "fail",
+        "check-022": "fail",
+        "check-023": "fail",
+        "check-024": "fail",
+        "check-025": "pass",
+        "check-026": "pass",
+        "check-027": "pass"
+      },
+      "source_attempt": "cargo-flight-dispatch__attempt01",
+      "source_result_sha256": "d984a1a24c0ea2511678ae8dddfe999d461d1a03e902aeb0990a232867d5d51d",
+      "seconds": 3179.826419353485,
+      "evidence": [
+        {
+          "path": "evidence/cargo-flight-dispatch/ctrf.json",
+          "sha256": "5e25a8086e32acc9ee08140f9009ee0fa4bb0971b0da21a48da9e086291b4dd2"
+        },
+        {
+          "path": "evidence/cargo-flight-dispatch/native-result.json",
+          "sha256": "d984a1a24c0ea2511678ae8dddfe999d461d1a03e902aeb0990a232867d5d51d"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "fin-saccr-rwa",
+      "status": "pass",
+      "reward": 1,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "pass",
+        "check-004": "pass",
+        "check-005": "pass",
+        "check-006": "pass",
+        "check-007": "pass",
+        "check-008": "pass",
+        "check-009": "pass",
+        "check-010": "pass",
+        "check-011": "pass",
+        "check-012": "pass",
+        "check-013": "pass",
+        "check-014": "pass",
+        "check-015": "pass",
+        "check-016": "pass",
+        "check-017": "pass",
+        "check-018": "pass",
+        "check-019": "pass",
+        "check-020": "pass",
+        "check-021": "pass",
+        "check-022": "pass",
+        "check-023": "pass",
+        "check-024": "pass"
+      },
+      "source_attempt": "fin-saccr-rwa__attempt01",
+      "source_result_sha256": "f747f2de1d68e535c4e7c2bbe8540f175c0ac8a4c55d6016ab421c00b0a6f4b6",
+      "seconds": 4100.4415674209595,
+      "evidence": [
+        {
+          "path": "evidence/fin-saccr-rwa/ctrf.json",
+          "sha256": "6b633e3c7e3af386df783d377888d652d28843566601678b238e1e990e43f833"
+        },
+        {
+          "path": "evidence/fin-saccr-rwa/native-result.json",
+          "sha256": "f747f2de1d68e535c4e7c2bbe8540f175c0ac8a4c55d6016ab421c00b0a6f4b6"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "heat-pump-warranty",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "fail",
+        "check-004": "pass",
+        "check-005": "pass",
+        "check-006": "pass",
+        "check-007": "fail",
+        "check-008": "fail",
+        "check-009": "fail",
+        "check-010": "pass",
+        "check-011": "pass",
+        "check-012": "fail",
+        "check-013": "pass",
+        "check-014": "pass",
+        "check-015": "pass",
+        "check-016": "pass",
+        "check-017": "pass",
+        "check-018": "pass",
+        "check-019": "pass",
+        "check-020": "pass"
+      },
+      "source_attempt": "heat-pump-warranty__attempt02",
+      "source_result_sha256": "fa0e5e4b411ad83984356caabffb8a72ba171d9488bdd96e2e96122892738ce0",
+      "seconds": 1742.452922821045,
+      "evidence": [
+        {
+          "path": "evidence/heat-pump-warranty/native-result.json",
+          "sha256": "fa0e5e4b411ad83984356caabffb8a72ba171d9488bdd96e2e96122892738ce0"
+        },
+        {
+          "path": "evidence/heat-pump-warranty/trace_results.json",
+          "sha256": "83c1363b0667b7338d42e78d60c8bf0b39d9d5143789fd44fa7dd3c283e5fd19"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "batched-eval-parity",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "fail",
+        "check-002": "fail",
+        "check-003": "fail",
+        "check-004": "fail",
+        "check-005": "pass"
+      },
+      "source_attempt": "batched-eval-parity__attempt01",
+      "source_result_sha256": "18ac0f6d520de01a9d44bd118301dbfbb48d6efb5a0866865749d87ce32b73ac",
+      "seconds": 6401.63131070137,
+      "evidence": [
+        {
+          "path": "evidence/batched-eval-parity/ctrf.json",
+          "sha256": "b3620c4e21ce41b7737a1bc866c91d6d41ddef3f090ea70fcc8b9059a3425a63"
+        },
+        {
+          "path": "evidence/batched-eval-parity/native-result.json",
+          "sha256": "18ac0f6d520de01a9d44bd118301dbfbb48d6efb5a0866865749d87ce32b73ac"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "vllm-deepseek-streaming",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "fail",
+        "check-002": "fail",
+        "check-003": "fail",
+        "check-004": "pass",
+        "check-005": "fail"
+      },
+      "source_attempt": "vllm-deepseek-streaming__attempt01",
+      "source_result_sha256": "954e30a3f21b48dd85cd1177c06d9bafc82b42fcfeb5b74bf609674e30efe83b",
+      "seconds": 4707.285938978195,
+      "evidence": [
+        {
+          "path": "evidence/vllm-deepseek-streaming/ctrf.json",
+          "sha256": "7142e28e07493ce9bdb535ef33838672fc2cfc5d3d64b54fcaa737557bc46ced"
+        },
+        {
+          "path": "evidence/vllm-deepseek-streaming/native-result.json",
+          "sha256": "954e30a3f21b48dd85cd1177c06d9bafc82b42fcfeb5b74bf609674e30efe83b"
+        }
+      ],
+      "health": {}
+    },
+    {
+      "task_id": "layout-config-recreation",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "pass",
+        "check-004": "pass",
+        "check-005": "pass",
+        "check-006": "pass",
+        "check-007": "pass",
+        "check-008": "pass",
+        "check-009": "pass",
+        "check-010": "fail",
+        "check-011": "fail"
+      },
+      "source_attempt": "layout-config-recreation__attempt01",
+      "source_result_sha256": "6d26c4d82a65ab31852a2983347e035d1628ca644b071d5852dc396a5d55a85f",
+      "seconds": 10288.766404151917,
+      "evidence": [
+        {
+          "path": "evidence/layout-config-recreation/ctrf.json",
+          "sha256": "e3aef99bde9302890f13a27e590af18b9f1d6bc9287825425c4aac3e39c3571c"
+        },
+        {
+          "path": "evidence/layout-config-recreation/native-result.json",
+          "sha256": "6d26c4d82a65ab31852a2983347e035d1628ca644b071d5852dc396a5d55a85f"
+        }
+      ],
+      "health": {
+        "health-001": "pass"
+      }
+    },
+    {
+      "task_id": "satb-audio-transcription",
+      "status": "fail",
+      "reward": 0,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "pass",
+        "check-004": "pass",
+        "check-005": "pass",
+        "check-006": "pass",
+        "check-007": "pass",
+        "check-008": "pass",
+        "check-009": "pass",
+        "check-010": "pass",
+        "check-011": "pass",
+        "check-012": "pass",
+        "check-013": "pass",
+        "check-014": "pass",
+        "check-015": "pass",
+        "check-016": "pass",
+        "check-017": "pass",
+        "check-018": "pass",
+        "check-019": "pass",
+        "check-020": "pass",
+        "check-021": "pass",
+        "check-022": "pass",
+        "check-023": "pass",
+        "check-024": "fail",
+        "check-025": "pass",
+        "check-026": "pass",
+        "check-027": "pass",
+        "check-028": "fail",
+        "check-029": "pass",
+        "check-030": "pass",
+        "check-031": "pass",
+        "check-032": "fail",
+        "check-033": "pass",
+        "check-034": "pass",
+        "check-035": "pass",
+        "check-036": "fail",
+        "check-037": "pass",
+        "check-038": "pass",
+        "check-039": "pass"
+      },
+      "source_attempt": "satb-audio-transcription__attempt01",
+      "source_result_sha256": "3aa7081c00a896613d6aabcd4fed0519d5042eb218d2d18826fa7d6e1462989e",
+      "seconds": 6271.189250230789,
+      "evidence": [
+        {
+          "path": "evidence/satb-audio-transcription/ctrf.json",
+          "sha256": "1c13bd1a4e0855b6d2dacf969ab90952ee456c158b9fbda2510d05517bf2616a"
+        },
+        {
+          "path": "evidence/satb-audio-transcription/native-result.json",
+          "sha256": "3aa7081c00a896613d6aabcd4fed0519d5042eb218d2d18826fa7d6e1462989e"
+        }
+      ],
+      "health": {
+        "health-001": "pass"
+      }
+    },
+    {
+      "task_id": "uefi-bootkit",
+      "status": "pass",
+      "reward": 1,
+      "checks": {
+        "check-001": "pass",
+        "check-002": "pass",
+        "check-003": "pass",
+        "check-004": "pass",
+        "check-005": "pass",
+        "check-006": "pass",
+        "check-007": "pass",
+        "check-008": "pass"
+      },
+      "source_attempt": "uefi-bootkit__attempt01",
+      "source_result_sha256": "f33fa19d5d69f053c6b282ea0a80e5301b374c9805c00a3f082d794a8067e990",
+      "seconds": 3936.286631345749,
+      "evidence": [
+        {
+          "path": "evidence/uefi-bootkit/ctrf.json",
+          "sha256": "f69ecea9e95a3de9ee8b8133e2ab8e503ffe0974ae2366ef8257472035621f5a"
+        },
+        {
+          "path": "evidence/uefi-bootkit/native-result.json",
+          "sha256": "f33fa19d5d69f053c6b282ea0a80e5301b374c9805c00a3f082d794a8067e990"
+        }
+      ],
+      "health": {}
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "label": "reference-v1",
+  "context_window_tokens": 262144,
+  "max_output_tokens": 65536,
+  "thinking": "pi-default",
+  "task_concurrency": 2,
+  "model_concurrency": 2,
+  "request_idle_timeout_seconds": 1800,
+  "verifier_timeout_floor_seconds": 3600,
+  "single_tool_elapsed_limit_seconds": 900,
+  "preserve_upstream_task_resources_and_agent_deadlines": true,
+  "image_input": "required when task supplies images; semantic preflight required",
+  "retry_policy": "one fresh solution attempt; no automatic solution retries"
+}
