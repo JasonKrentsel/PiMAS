@@ -11,7 +11,21 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig, AgentRole } from "./agent-config.js";
-import { createExecutorBashTool } from "./execution-tools.js";
+import { createExecutorBashTool, type CommandLimits } from "./execution-tools.js";
+import { createWorkspaceTools, type Workspace, type WorkspaceToolName } from "./workspace.js";
+
+/**
+ * Native tool permission sets. `inspect` adds bash for looking around; its read-only
+ * intent is a prompt rule, not an enforced boundary.
+ */
+export type Toolset = "none" | "read" | "inspect" | "execute";
+
+const TOOLSETS: Record<Toolset, readonly WorkspaceToolName[]> = {
+  none: [],
+  read: ["read", "grep", "find", "ls"],
+  inspect: ["read", "grep", "find", "ls", "bash"],
+  execute: ["read", "grep", "find", "ls", "edit", "write", "bash"],
+};
 
 interface RoleSessionOptions {
   cwd: string;
@@ -20,11 +34,17 @@ interface RoleSessionOptions {
   roles: AgentConfig["roles"];
   sessionManager: SessionManager;
   customTools?: ToolDefinition[];
+  /** Defaults to `execute` for executors and `read` otherwise. */
+  toolset?: Toolset;
+  /** Run native tools through this workspace instead of the host filesystem. */
+  workspace?: Workspace;
+  commandLimits?: CommandLimits;
 }
 
 /** The caller owns prompting, local history, and abort/dispose of each Pi session. */
 export async function createRoleSession(options: RoleSessionOptions): Promise<AgentSession> {
   const profile = options.roles[options.role];
+  if (!profile) throw new Error(`No ${options.role} profile is configured`);
   const systemPrompt = (await readFile(profile.systemPrompt, "utf8")).trim();
   if (!systemPrompt) throw new Error(`System prompt is empty: ${profile.systemPrompt}`);
 
@@ -77,20 +97,22 @@ export async function createRoleSession(options: RoleSessionOptions): Promise<Ag
   }
 
   const suppliedTools = options.customTools ?? [];
-  const nativeNames = new Set(["read", "grep", "find", "ls", "write", "edit", "bash", "powershell"]);
-  if (suppliedTools.some((tool) => nativeNames.has(tool.name))) {
+  const reservedNames = new Set(["read", "grep", "find", "ls", "write", "edit", "bash", "powershell"]);
+  if (suppliedTools.some((tool) => reservedNames.has(tool.name))) {
     throw new Error("Custom tools cannot replace native role permissions");
   }
-  const customTools: ToolDefinition[] = [
-    ...suppliedTools,
-    ...(options.role === "executor" ? [createExecutorBashTool(options.cwd)] : []),
-  ];
+  const nativeNames = TOOLSETS[options.toolset ?? (options.role === "executor" ? "execute" : "read")];
+  // Without a workspace, Pi's own local tools are used and only bash needs the timeout policy.
+  const nativeTools = options.workspace
+    ? createWorkspaceTools(options.workspace, nativeNames, options.commandLimits)
+    : nativeNames.includes("bash") ? [createExecutorBashTool(options.cwd)] : [];
+  const customTools: ToolDefinition[] = [...suppliedTools, ...nativeTools];
   const { session } = await createAgentSession({
     cwd: options.cwd,
     modelRuntime,
     model,
     thinkingLevel: profile.thinkingLevel,
-    tools: ["read", "grep", "find", "ls", ...(options.role === "executor" ? ["edit", "write"] : []), ...customTools.map((tool) => tool.name)],
+    tools: [...nativeNames, ...suppliedTools.map((tool) => tool.name)],
     customTools,
     sessionManager: options.sessionManager,
     settingsManager,

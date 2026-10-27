@@ -8,17 +8,30 @@ import {
 export const DEFAULT_COMMAND_TIMEOUT_SECONDS = 120;
 export const MAX_COMMAND_TIMEOUT_SECONDS = 300;
 
+export interface CommandLimits {
+  defaultSeconds: number;
+  maxSeconds: number;
+}
+
+const TASK_RUN_LIMITS: CommandLimits = {
+  defaultSeconds: DEFAULT_COMMAND_TIMEOUT_SECONDS,
+  maxSeconds: MAX_COMMAND_TIMEOUT_SECONDS,
+};
+
 /** Policy sits beneath the tool so omitted or oversized model timeouts cannot bypass it. */
-export function boundedBashOperations(delegate: BashOperations = createLocalBashOperations()): BashOperations {
+export function boundedBashOperations(
+  delegate: BashOperations = createLocalBashOperations(),
+  limits: CommandLimits = TASK_RUN_LIMITS,
+): BashOperations {
   return {
     async exec(command, cwd, options) {
-      const requested = options.timeout ?? DEFAULT_COMMAND_TIMEOUT_SECONDS;
+      const requested = options.timeout ?? limits.defaultSeconds;
       if (!Number.isFinite(requested) || requested <= 0) {
         throw new Error("Command timeout must be a finite positive number of seconds");
       }
       return delegate.exec(command, cwd, {
         ...options,
-        timeout: Math.min(requested, MAX_COMMAND_TIMEOUT_SECONDS),
+        timeout: Math.min(requested, limits.maxSeconds),
       });
     },
   };

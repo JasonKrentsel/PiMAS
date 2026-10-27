@@ -1,2 +1,6 @@
 # Real provider/role configuration; tracked templates live in config.example/.
 /config/
+# Harbor job output and collected results.
+/jobs/
+/results/
+__pycache__/

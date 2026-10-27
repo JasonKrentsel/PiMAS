@@ -52,6 +52,10 @@ The outer root's [`config.example/`](../config.example/README.md) provides conta
 
 The bridge binds checkpoints to a task/attempt/container identity and rejects old state in a fresh workspace. It reserves stdout for the done protocol message. The Ubuntu telecom derivative `pimas/telecom:execution-v1` has passed the scripted plan/execute/review smoke with native mutation, shell checks, and command timeout enforcement. The earlier `vertical-slice` image contains the old read-only source; rebuild after code changes. Other task images, broader live task-solving quality, and full benchmark evaluation remain unverified.
 
+## Fixed-stage pipeline (Terminal-Bench baseline)
+
+`src/pipeline.ts` runs a fixed researcher → planner → executor (→ reviewer → correction) sequence instead of letting an orchestrator model choose spawns, so every run has the same stages and inputs. Each stage ends by calling a structured submit tool, and `provenance.jsonl` records submissions, parents, tool calls tagged by plan step, token usage, and workspace files changed. Native tools run through a `Workspace` (`src/workspace.ts`) rather than the host filesystem; `src/pipeline-bridge.ts` relays them to a Harbor task container. Running it on Terminal-Bench is described in [`../pimas_harbor/README.md`](../pimas_harbor/README.md). Stage prompts are in `prompts/pipeline/`; role profiles may add an optional `researcher` role.
+
 ## Existing inspection CLI
 
 Use Node.js **22.19 or newer**. The provider example targets an OpenAI-compatible endpoint with chat-completion tool calls, such as LM Studio at `http://127.0.0.1:1234/v1`.

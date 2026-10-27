@@ -3,7 +3,9 @@ import { dirname, resolve } from "node:path";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 export const AGENT_ROLES = ["orchestrator", "planner", "executor", "reviewer"] as const;
-export type AgentRole = typeof AGENT_ROLES[number];
+/** Used only by the fixed-stage pipeline; TaskRun configurations may omit it. */
+export const OPTIONAL_ROLES = ["researcher"] as const;
+export type AgentRole = typeof AGENT_ROLES[number] | typeof OPTIONAL_ROLES[number];
 
 export interface AgentProfile {
   provider: string;
@@ -14,7 +16,7 @@ export interface AgentProfile {
 }
 
 export interface AgentConfig {
-  roles: Record<AgentRole, AgentProfile>;
+  roles: Record<typeof AGENT_ROLES[number], AgentProfile> & Partial<Record<typeof OPTIONAL_ROLES[number], AgentProfile>>;
 }
 
 const THINKING_LEVELS: readonly AgentProfile["thinkingLevel"][] = [
@@ -34,7 +36,7 @@ export async function loadAgentConfig(file: string): Promise<AgentConfig> {
   const root = object(parsed, "agents configuration");
   checkFields(root, ["roles"], "agents configuration");
   const roles = object(root.roles, "roles");
-  checkFields(roles, AGENT_ROLES, "roles");
+  checkFields(roles, [...AGENT_ROLES, ...OPTIONAL_ROLES], "roles");
   const directory = dirname(configFile);
   return {
     roles: {
@@ -42,6 +44,7 @@ export async function loadAgentConfig(file: string): Promise<AgentConfig> {
       planner: profile(roles.planner, "planner", directory),
       executor: profile(roles.executor, "executor", directory),
       reviewer: profile(roles.reviewer, "reviewer", directory),
+      ...(roles.researcher === undefined ? {} : { researcher: profile(roles.researcher, "researcher", directory) }),
     },
   };
 }

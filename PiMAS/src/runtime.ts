@@ -563,7 +563,7 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined): Pro
 }
 
 /** Include compacted turns and summarization usage, not just the current context. */
-function collectUsage(session: AgentSession): Usage {
+export function collectUsage(session: AgentSession): Usage {
   const total: Usage = {
     input: 0,
     output: 0,
