@@ -26,16 +26,40 @@ Harbor ── pimas_harbor.agent:PimasAgent (Python, host) ── environment.ex
 **Single mode** (`PIMAS_MODE=single`) runs one executor on the raw task. Use it as the single-agent comparison.
 
 **Provenance.** Every stage writes to `agent/pimas/provenance.jsonl` as it runs, so a run killed at the 8-hour agent timeout still leaves a partial trace. Each stage records:
+- its exact prompt and a SHA-256 of it
 - its structured submission and a SHA-256 of it
 - its parents
+- its conversation file
 - token usage
 - every tool call, tagged with the plan step the executor declared through `begin_step`
-- the workspace files it created or modified
+- every file it created, modified or deleted anywhere in the container
 
 **Budgets.**
 - Shell commands default to 600 s and are capped at 3600 s (`PIPELINE_COMMAND_LIMITS`).
 - Each stage has a tool-call budget (`DEFAULT_BUDGETS` in `pipeline.ts`). Past it, the stage is stopped and told to submit.
 - The overall limit is the task's own agent timeout, enforced by Harbor.
+
+## What each trial stores
+
+Everything for one trial is in `jobs/<condition>/<replicate>/<trial>/`. Nothing is derived on the fly, so later analysis (propagation, replay, unauthorized actions) works from these files alone.
+
+| File | Contents |
+| --- | --- |
+| `result.json` | Harbor's trial result: reward, exception, timings for setup, agent and verifier |
+| `config.json`, `lock.json` | Harbor's trial configuration, including `--ae` settings and the pinned task |
+| `verifier/reward.txt`, `verifier/ctrf.json` | Official grade and per-test results (`trace_results.json` for the warranty task) |
+| `agent/pimas/run-info.json` | Git commit, branch and uncommitted files; Pi and Harbor versions; host; settings; config and prompt hashes; container working directory; bridge exit; whole-run file-change counts and scan times. Written before the run starts and updated at the end |
+| `agent/pimas/instruction.md` | The task instruction as given to the agent |
+| `agent/pimas/config/` | Copies of `models.json` (credentials redacted), `agents.json`, and each role's prompt as used |
+| `agent/pimas/provenance.jsonl` | Run settings (budgets, limits, role profiles), then per stage: start with prompt, session file, compact tool calls, end with the full artifact |
+| `agent/pimas/tool-calls.jsonl` | Every tool call with complete arguments and complete output text, step tag, error flag and timing |
+| `agent/pimas/sessions/*.jsonl` | Pi's complete conversation per stage: every message, tool call, tool result and token count |
+| `agent/pimas/summary.json` | All stage artifacts and totals; missing if the run was killed |
+| `agent/pimas/filesystem/before.tsv.gz`, `after.tsv.gz` | Manifest of every file in the container before and after the agent ran: path, mtime, size, mode |
+| `agent/pimas/filesystem/changes.tsv.gz` | `C`/`M`/`D` lines: files created, modified, deleted during the run, anywhere in the container |
+| `agent/pimas/bridge-stderr.txt` | Pipeline diagnostics and errors |
+
+Manifests skip `/proc`, `/sys`, `/dev`, `/run`, Harbor's `/logs` mount, and the tracker's own `/tmp/.pimas`. Scanning time is recorded as tracking overhead. It counts against the task's agent timeout.
 
 ## Server setup (once)
 
@@ -61,52 +85,61 @@ config/pipeline/serve_vllm.sh
 
 ## Runs
 
-Run from the repository root. `-k 3` gives three independent attempts per task inside one job, and each job is one condition. Leave out the three GPU tasks with `-x <task-name>` (repeatable). They are the tasks whose `task.toml` asks for `gpus` > 0.
+Run from the repository root, on a commit, with no uncommitted changes. `run-info.json` records the commit and flags uncommitted files.
+
+Use one folder per condition and one Harbor job per replicate (`-o jobs/<condition> --job-name r1`), not `-k 3`. Each replicate is then complete on its own, you can stop after any replicate, and a broken run can stay as it is while a new job takes its place. Never rerun into an existing job folder.
+
+Leave out the three GPU tasks with `-x <task-name>` (repeatable). They are the tasks whose `task.toml` asks for `gpus` > 0.
 
 ```bash
 export PYTHONPATH=$PWD
 DATASET=terminal-bench/terminal-bench@4.0.0
+AGENT="--agent pimas_harbor.agent:PimasAgent -m Qwen/Qwen3.8-27B"
 ```
 
 1. **Infrastructure check.** The reference solutions should pass, and an agent that does nothing sets the check-rate floor.
 
 ```bash
-harbor run -d $DATASET -a oracle -n 8 --job-name oracle -o jobs
+harbor run -d $DATASET -a oracle -n 8 -o jobs/infra --job-name oracle
 ```
 
 ```bash
-harbor run -d $DATASET -a nop -n 8 --job-name nop -o jobs
+harbor run -d $DATASET -a nop -n 8 -o jobs/infra --job-name nop
 ```
 
 2. **Smoke test.** Run one short task end to end with the pipeline.
 
 ```bash
-harbor run -d $DATASET -i mvcc-lsm-compaction --agent pimas_harbor.agent:PimasAgent -m Qwen/Qwen3.8-27B -n 1 --job-name smoke -o jobs
+harbor run -d $DATASET -i mvcc-lsm-compaction $AGENT -n 1 -o jobs/smoke --job-name s1
 ```
 
-Check the following, then look at `jobs/smoke/*/agent/pimas/provenance.jsonl` and `bridge-stderr.txt`:
-- `jobs/smoke/*/verifier/reward.txt` exists
-- `ctrf.json` exists
-- `agent/pimas/summary.json` shows the stages as `submitted`
+Check that `jobs/smoke/s1/*/` has every file in the table above. In particular:
+- `summary.json` shows the stages as `submitted`
+- `run-info.json` has a `filesystem` block with counts
+- `tool-calls.jsonl` has full outputs
 
-3. **Pilot for the model decision.** Run 10 tasks once each.
+Then read `bridge-stderr.txt`.
+
+3. **Full sweep, one replicate.** Use it to measure time per task and per tool call before deciding what to prune.
 
 ```bash
-harbor run -d $DATASET --agent pimas_harbor.agent:PimasAgent -m Qwen/Qwen3.8-27B -l 10 -n 8 --job-name pilot -o jobs
+harbor run -d $DATASET $AGENT -n 10 -o jobs/clean-pipeline --job-name r1
 ```
 
-4. **Baseline.** Run each condition with 3 attempts per task.
+If pruning only drops tasks, `r1` still counts as a replicate. If it changes limits or budgets, treat `r1` as a pilot and move it to `jobs/pilot/`.
+
+4. **Remaining replicates and conditions,** with settings frozen.
 
 ```bash
-harbor run -d $DATASET --agent pimas_harbor.agent:PimasAgent -m Qwen/Qwen3.8-27B -k 3 -n 10 --job-name pipeline -o jobs
+harbor run -d $DATASET $AGENT -n 10 -o jobs/clean-pipeline --job-name r2
 ```
 
 ```bash
-harbor run -d $DATASET --agent pimas_harbor.agent:PimasAgent -m Qwen/Qwen3.8-27B -k 3 -n 10 --ae PIMAS_REVIEW=1 --job-name pipeline-review -o jobs
+harbor run -d $DATASET $AGENT -n 10 --ae PIMAS_REVIEW=1 -o jobs/clean-pipeline-review --job-name r1
 ```
 
 ```bash
-harbor run -d $DATASET --agent pimas_harbor.agent:PimasAgent -m Qwen/Qwen3.8-27B -k 3 -n 10 --ae PIMAS_MODE=single --job-name single -o jobs
+harbor run -d $DATASET $AGENT -n 10 --ae PIMAS_MODE=single -o jobs/clean-single --job-name r1
 ```
 
 `-n` is the number of task containers running at once. Size it to host RAM, since tasks reserve 4–16 GB each. Do not use Harbor's `--max-retries`: one attempt per trial, with failures kept, is the methodology.
@@ -118,8 +151,10 @@ mkdir -p results
 ```
 
 ```bash
-python3 -m pimas_harbor.collect jobs --rows results/trials.csv --summary results/summary.csv
+python3 -m pimas_harbor.collect jobs --rows results/trials.csv --summary results/summary.csv --tool-calls results/tool_calls.csv
 ```
+
+The CSVs are always rebuilt from `jobs/`, so back up `jobs/` and nothing else.
 
 `trials.csv` has one row per trial:
 - official reward
@@ -130,8 +165,13 @@ python3 -m pimas_harbor.collect jobs --rows results/trials.csv --summary results
 - tokens (input including cached, cached, output)
 - provenance size
 - per-stage status, time, tokens and tool calls
+- condition and replicate, git commit and whether there were uncommitted changes, mode and review setting
+- whole-container files created, modified and deleted, and how many changes fall outside the task directory (the clean-run baseline for unauthorized actions)
+- tracking overhead: run-level scan seconds and per-stage tracking seconds
 
-`summary.csv` has one row per job (condition):
+`tool_calls.csv` has one row per tool call: task, stage, plan step, tool, seconds, error flag, start time, bash command (first 300 characters), and argument and output sizes. Use it to find the tasks and tool calls that dominate run time.
+
+`summary.csv` has one row per condition, pooling its replicates:
 - pass rate and per-task check fraction, each with a 95% bootstrap CI over tasks (replicates are averaged within a task first)
 - tasks always and sometimes passed
 - errored trials
@@ -152,6 +192,8 @@ Agent environment variables, set with `--ae KEY=VALUE` or in the shell:
 | `PIMAS_AGENTS` | `config/pipeline/agents.json` | role profiles and prompts |
 | `PIMAS_ROOT` | `PiMAS/` | PiMAS checkout |
 | `PIMAS_NODE` | `node` | Node executable |
+| `PIMAS_SNAPSHOT_ROOT` | `/` | Directory tracked for per-stage file changes; `none` turns it off |
+| `PIMAS_RUN_SNAPSHOT` | `1` | `0` skips the whole-container manifests before and after the run |
 
 ## Tests
 
@@ -176,6 +218,7 @@ The agent test needs Harbor installed and drives the relay with a fake bridge an
 ## Known limits
 
 - **Inspection-only is a prompt rule, not enforced.** The researcher and reviewer have bash, so nothing technically stops them changing files. Any files they change appear in their stage's `changedFiles`.
-- **`changedFiles` misses some changes.** It only covers files under the task working directory whose modification time moved during the stage. Deleted files and changes outside that directory are not listed.
+- **Change detection compares path, modification time, size and mode.** A rewrite that keeps all four the same is missed, as are changes inside pruned directories. `changedFiles` is the task-directory subset of created and modified files; `fileChanges` has everything, deletions included.
+- **Scans count against the agent timeout.** On images with very many files, check `stage_tracking_seconds` and `run_snapshot_seconds` in the smoke run. If they are large, narrow per-stage tracking with `PIMAS_SNAPSHOT_ROOT` and keep the run-level manifests.
 - **Command timeouts leave survivors in rare cases.** Each command is wrapped in coreutils `timeout` inside the container when it is available, but a process that escapes its process group can outlive the timeout.
 - **Planner fact IDs are checked; executor behavior is not.** The planner must cite fact IDs that exist. Whether the executor actually relied on them shows up only in the tool-call tags and the outcome.

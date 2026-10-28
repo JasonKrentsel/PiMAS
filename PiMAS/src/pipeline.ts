@@ -1,9 +1,11 @@
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { Type, type Usage } from "@earendil-works/pi-ai";
 import { defineTool, SessionManager, type AgentSession, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createRoleSession, type Toolset } from "./agent.js";
 import type { AgentConfig, AgentRole } from "./agent-config.js";
 import type { CommandLimits } from "./execution-tools.js";
+import { FileTracker } from "./filesystem.js";
 import {
   contentDigest,
   ProvenanceLog,
@@ -12,7 +14,7 @@ import {
   type ToolCallRecord,
 } from "./provenance.js";
 import { collectUsage } from "./runtime.js";
-import { shellQuote, type Workspace } from "./workspace.js";
+import type { Workspace } from "./workspace.js";
 
 /**
  * Fixed-topology alternative to TaskRun: host code, not an orchestrator model, decides
@@ -34,6 +36,8 @@ export interface PipelineOptions {
   commandLimits?: CommandLimits;
   /** Non-submit tool calls allowed per stage before it is told to submit. */
   toolCallBudgets?: Partial<Record<StageName, number>>;
+  /** Directory whose files are tracked per stage (default "/"); null turns tracking off. */
+  snapshotRoot?: string | null;
   signal?: AbortSignal;
 }
 
@@ -73,8 +77,22 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   const log = new ProvenanceLog(options.directory);
   const started = Date.now();
   const artifacts: StageArtifact[] = [];
-  const context: StageContext = { options, log, artifacts };
-  await log.record({ type: "run_start", mode, review, request: options.request });
+  const snapshotRoot = options.snapshotRoot === undefined ? "/" : options.snapshotRoot;
+  const tracker = snapshotRoot === null
+    ? null
+    : new FileTracker(options.workspace, snapshotRoot, `run-${randomUUID().slice(0, 8)}`);
+  const context: StageContext = { options, log, artifacts, tracker };
+  // Everything that shapes agent behavior, so a later reader can tell runs apart.
+  const settings = {
+    workspaceCwd: options.workspace.cwd,
+    maxCorrections: options.maxCorrections ?? 1,
+    commandLimits: options.commandLimits ?? PIPELINE_COMMAND_LIMITS,
+    toolCallBudgets: { ...DEFAULT_BUDGETS, ...options.toolCallBudgets },
+    submitAllowance: SUBMIT_ALLOWANCE,
+    snapshotRoot,
+    roles: options.roles,
+  };
+  await log.record({ type: "run_start", mode, review, request: options.request, settings });
 
   let approved: boolean | null = null;
   try {
@@ -149,6 +167,7 @@ interface StageContext {
   options: PipelineOptions;
   log: ProvenanceLog;
   artifacts: StageArtifact[];
+  tracker: FileTracker | null;
 }
 
 interface StageSpec<T> {
@@ -175,9 +194,12 @@ class PipelineInterrupted extends Error {
 async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<StageOutcome<T>> {
   const { options, log } = context;
   if (options.signal?.aborted) throw new PipelineInterrupted();
-  await log.record({ type: "stage_start", id: spec.id, stage: spec.stage, role: spec.role, parents: spec.parents });
+  await log.record({
+    type: "stage_start", id: spec.id, stage: spec.stage, role: spec.role, parents: spec.parents,
+    prompt: spec.prompt, promptSha256: contentDigest(spec.prompt),
+  });
   const startedAt = new Date();
-  const marker = await startChangeProbe(options.workspace);
+  const before = await context.tracker?.snapshot() ?? null;
 
   let submission: T | undefined;
   let currentStep: string | null = null;
@@ -200,29 +222,32 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
       commandLimits: options.commandLimits ?? PIPELINE_COMMAND_LIMITS,
     });
     const active = session;
+    await log.record({ type: "stage_session", id: spec.id, sessionFile: active.sessionManager.getSessionFile() ?? null });
     const budget = options.toolCallBudgets?.[spec.stage] ?? DEFAULT_BUDGETS[spec.stage];
     const submitName = tools[0]!.name;
     let spent = 0;
     let total = 0;
     let overBudget = false;
-    const starts = new Map<string, { tool: string; args: string; stepId: string | null; startedAt: string }>();
+    const starts = new Map<string, { args: unknown; stepId: string | null; startedAt: string }>();
     const unsubscribe = active.subscribe((event) => {
       if (event.type === "tool_execution_start") {
-        starts.set(event.toolCallId, {
-          tool: event.toolName, args: truncate(JSON.stringify(event.args) ?? "", 2000),
-          stepId: currentStep, startedAt: new Date().toISOString(),
-        });
+        starts.set(event.toolCallId, { args: event.args, stepId: currentStep, startedAt: new Date().toISOString() });
       } else if (event.type === "tool_execution_end") {
         const start = starts.get(event.toolCallId);
         starts.delete(event.toolCallId);
         const call: ToolCallRecord = {
           toolCallId: event.toolCallId, tool: event.toolName,
-          stepId: start?.stepId ?? currentStep, args: start?.args ?? "",
+          stepId: start?.stepId ?? currentStep, args: truncate(JSON.stringify(start?.args) ?? "", 2000),
           isError: event.isError, durationMs: event.durationMs ?? null,
           startedAt: start?.startedAt ?? new Date().toISOString(),
         };
         toolCalls.push(call);
         void log.record({ type: "tool_call", stageId: spec.id, call });
+        void log.recordToolOutput({
+          stageId: spec.id, toolCallId: call.toolCallId, tool: call.tool, stepId: call.stepId,
+          args: start?.args ?? null, output: resultText(event.result), isError: call.isError,
+          durationMs: call.durationMs, startedAt: call.startedAt, endedAt: new Date().toISOString(),
+        });
         // Over budget, every further non-submit call stops the turn, including during the reminder.
         // The hard cap also stops a model that keeps resubmitting.
         const nonSubmit = event.toolName !== submitName;
@@ -250,6 +275,8 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
     error = caught instanceof Error ? caught.message : String(caught);
   }
 
+  const fileChanges = await context.tracker?.changesSince(before) ?? null;
+  const cwdPrefix = options.workspace.cwd.endsWith("/") ? options.workspace.cwd : `${options.workspace.cwd}/`;
   const endedAt = new Date();
   const artifact: StageArtifact = {
     id: spec.id,
@@ -265,7 +292,10 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
     latencyMs: endedAt.getTime() - startedAt.getTime(),
     usage: session ? collectUsage(session) : sumUsage([]),
     toolCalls,
-    changedFiles: await finishChangeProbe(options.workspace, marker),
+    changedFiles: fileChanges
+      ? [...fileChanges.created, ...fileChanges.modified].filter((file) => file.startsWith(cwdPrefix)).sort()
+      : null,
+    fileChanges,
     sessionFile: session?.sessionManager.getSessionFile() ?? null,
   };
   if (session) {
@@ -429,27 +459,13 @@ function correctionPrompt(
 
 // --- Helpers -----------------------------------------------------------------------
 
-/** A marker file whose mtime splits "before this stage" from "during this stage". */
-async function startChangeProbe(workspace: Workspace): Promise<string | null> {
-  try {
-    const result = await workspace.exec("mktemp /tmp/pimas-stage-XXXXXX", { timeoutSeconds: 30 });
-    return result.exitCode === 0 ? result.stdout.trim() || null : null;
-  } catch {
-    return null;
-  }
-}
-
-async function finishChangeProbe(workspace: Workspace, marker: string | null): Promise<string[] | null> {
-  if (!marker) return null;
-  try {
-    const result = await workspace.exec(
-      `find ${shellQuote(workspace.cwd)} -xdev -type f -newer ${shellQuote(marker)} -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/__pycache__/*' 2>/dev/null | head -n 2000; rm -f ${shellQuote(marker)}`,
-      { timeoutSeconds: 120 },
-    );
-    return result.stdout.split("\n").filter(Boolean).sort();
-  } catch {
-    return null;
-  }
+/** Text parts of a tool result; images and other parts are noted, not embedded. */
+function resultText(result: unknown): string {
+  const content = (result as { content?: unknown } | undefined)?.content;
+  if (!Array.isArray(content)) return JSON.stringify(result ?? null);
+  return content
+    .map((part: { type?: string; text?: string }) => (part.type === "text" ? part.text ?? "" : `[${part.type ?? "unknown"} content]`))
+    .join("");
 }
 
 function truncate(value: string, limit: number): string {

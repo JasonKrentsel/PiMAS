@@ -1,6 +1,6 @@
 import asyncio
+import gzip
 import json
-import os
 import stat
 import sys
 import tempfile
@@ -11,8 +11,11 @@ try:
     from harbor.environments.base import ExecResult
     from harbor.models.agent.context import AgentContext
     from pimas_harbor.agent import PimasAgent
+    from pimas_harbor.records import RunFilesystem
 except ImportError:  # Harbor is only needed for the agent, not the collector.
     PimasAgent = None
+
+REPO = Path(__file__).resolve().parents[2]
 
 
 class LocalEnvironment:
@@ -36,6 +39,9 @@ class LocalEnvironment:
             raise RuntimeError(f"Command timed out after {timeout_sec} seconds")
         return ExecResult(stdout=stdout.decode(), stderr=stderr.decode(), return_code=process.returncode)
 
+    async def download_file(self, source_path, target_path):
+        Path(target_path).write_bytes(Path(source_path).read_bytes())
+
 
 @unittest.skipIf(PimasAgent is None, "Harbor is not installed")
 class AgentRelayTest(unittest.TestCase):
@@ -49,7 +55,11 @@ class AgentRelayTest(unittest.TestCase):
             bridge.chmod(bridge.stat().st_mode | stat.S_IEXEC)
             logs = root / "logs"
             logs.mkdir()
-            agent = PimasAgent(logs_dir=logs, model_name="test/model", extra_env={"PIMAS_NODE": str(bridge), "PIMAS_ROOT": tmp})
+            agent = PimasAgent(logs_dir=logs, model_name="test/model", extra_env={
+                "PIMAS_NODE": str(bridge), "PIMAS_ROOT": tmp, "PIMAS_RUN_SNAPSHOT": "0", "PIMAS_REVIEW": "1",
+                "PIMAS_MODELS": str(REPO / "config.example/pipeline/models.json"),
+                "PIMAS_AGENTS": str(REPO / "config.example/pipeline/agents.json"),
+            })
             environment = LocalEnvironment(workdir)
             context = AgentContext()
 
@@ -67,6 +77,44 @@ class AgentRelayTest(unittest.TestCase):
             self.assertEqual(context.n_output_tokens, 2)
             self.assertEqual(context.metadata["pimas_status"], "completed")
             self.assertEqual(context.metadata["pimas_stages"][0]["tool_calls"], 1)
+
+            state = logs / "pimas"
+            self.assertEqual((state / "instruction.md").read_text(), "Do the task.")
+            info = json.loads((state / "run-info.json").read_text())
+            self.assertEqual(info["settings"]["review"], "1")
+            self.assertEqual(info["model_label"], "test/model")
+            self.assertEqual(info["workspace_cwd"], str(workdir.resolve()))
+            self.assertTrue(info["bridge_finished"])
+            self.assertIn("--review", info["bridge_command"])
+            self.assertRegex(info["config"]["agents"]["sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(set(info["config"]["prompts"]), {"orchestrator", "researcher", "planner", "executor", "reviewer"})
+            self.assertTrue((state / "config/prompts/researcher.md").read_text().startswith("You are the research agent"))
+            self.assertEqual(json.loads((state / "config/models.json").read_text())["providers"]["vllm"]["apiKey"], "unused")
+
+    def test_run_filesystem_records_manifests_and_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workdir = root / "app"
+            workdir.mkdir()
+            (workdir / "edit.txt").write_text("short")
+            (workdir / "gone.txt").write_text("x")
+            state = root / "state"
+            tracker = RunFilesystem(LocalEnvironment(workdir), state, root=str(workdir))
+
+            async def scenario():
+                self.assertTrue((await tracker.start())["ok"])
+                (workdir / "edit.txt").write_text("a longer body")
+                (workdir / "gone.txt").unlink()
+                (workdir / "made.txt").write_text("y")
+                return await tracker.finish()
+
+            summary = asyncio.run(scenario())
+            self.assertEqual((summary["created"], summary["modified"], summary["deleted"]), (1, 1, 1))
+            self.assertEqual(summary["files"], {"before": "before.tsv.gz", "after": "after.tsv.gz", "changes": "changes.tsv.gz"})
+            with gzip.open(state / "filesystem/changes.tsv.gz", "rt") as handle:
+                self.assertEqual(handle.read().splitlines(), [
+                    f"C\t{workdir}/made.txt", f"D\t{workdir}/gone.txt", f"M\t{workdir}/edit.txt",
+                ])
 
 
 if __name__ == "__main__":

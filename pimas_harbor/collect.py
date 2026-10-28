@@ -1,9 +1,10 @@
 """Collect Harbor trial folders into one results table and a per-condition summary.
 
-    python -m pimas_harbor.collect jobs/ --rows results.csv --summary summary.csv
+    python -m pimas_harbor.collect jobs/ --rows trials.csv --summary summary.csv --tool-calls tool_calls.csv
 
-One row per trial. A condition is the Harbor job folder name (for example `pipeline-r1`),
-or `--condition-depth` levels of its path when jobs are grouped in subfolders.
+Expected layout: jobs/<condition>/<replicate job>/<trial>/. With the default
+--condition-depth 1 the first folder names the condition and the next one the replicate.
+Rows: one per trial. Tool calls: one per tool call, for finding what dominates run time.
 Standard library only, so it also runs where Harbor is not installed.
 """
 
@@ -11,11 +12,12 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import datetime
+import gzip
 import json
 import random
 import statistics
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +63,26 @@ def check_counts(trial_dir: Path, task: str) -> tuple[int | None, int | None, st
     return None, None, "none"
 
 
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def outside_changes(state: Path, cwd: str | None) -> int | None:
+    """Container-wide changes outside the task working directory, from filesystem/changes.tsv(.gz)."""
+    for name in ("changes.tsv.gz", "changes.tsv"):
+        file = state / "filesystem" / name
+        if not file.exists():
+            continue
+        opener = gzip.open if name.endswith(".gz") else open
+        prefix = (cwd or "/app").rstrip("/") + "/"
+        with opener(file, "rt", encoding="utf-8", errors="replace") as handle:
+            return sum(1 for line in handle if "\t" in line and not line.split("\t", 1)[1].startswith(prefix))
+    return None
+
+
 def _seconds(timing: dict[str, Any] | None) -> float | None:
 
 
@@ -77,6 +99,7 @@ def trial_row(result_file: Path, jobs_root: Path, condition_depth: int) -> dict[
     task = _task_short_name(result.get("task_name", trial_dir.name))
     relative = trial_dir.relative_to(jobs_root).parts
     condition = "/".join(relative[:condition_depth]) if len(relative) > condition_depth else relative[0]
+    replicate = relative[condition_depth] if len(relative) > condition_depth + 1 else None
     rewards = (result.get("verifier_result") or {}).get("rewards") or {}
     reward = rewards.get("reward")
     exception = result.get("exception_info") or {}
@@ -85,8 +108,11 @@ def trial_row(result_file: Path, jobs_root: Path, condition_depth: int) -> dict[
     state = trial_dir / "agent" / "pimas"
     events = read_events(state / "provenance.jsonl")
     usage = session_usage(state / "sessions")
+    info = _read_json(state / "run-info.json")
+    filesystem = info.get("filesystem") or {}
     row: dict[str, Any] = {
         "condition": condition,
+        "replicate": replicate,
         "task": task,
         "trial": result.get("trial_name", trial_dir.name),
         "agent": (result.get("agent_info") or {}).get("name"),
@@ -103,9 +129,21 @@ def trial_row(result_file: Path, jobs_root: Path, condition_depth: int) -> dict[
         "cache_read_tokens": usage["cacheRead"],
         "output_tokens": usage["output"],
         "provenance_bytes": (state / "provenance.jsonl").stat().st_size if (state / "provenance.jsonl").exists() else None,
+        "git_commit": (info.get("code") or {}).get("git_commit"),
+        "git_dirty": (info.get("code") or {}).get("git_dirty"),
+        "mode": (info.get("settings") or {}).get("mode"),
+        "review": (info.get("settings") or {}).get("review"),
+        "fs_created": filesystem.get("created"),
+        "fs_modified": filesystem.get("modified"),
+        "fs_deleted": filesystem.get("deleted"),
+        "fs_changes_outside_cwd": outside_changes(state, info.get("workspace_cwd")),
+        "run_snapshot_seconds": ((info.get("filesystem_start") or {}).get("scan_seconds") or 0) + (filesystem.get("scan_seconds") or 0)
+        if filesystem else None,
     }
     stages = stage_summaries(events)
     row["tool_calls"] = sum(stage["tool_calls"] for stage in stages)
+    overheads = [stage["tracking_overhead_ms"] for stage in stages if stage["tracking_overhead_ms"] is not None]
+    row["stage_tracking_seconds"] = sum(overheads) / 1000 if overheads else None
     for name in STAGES:
         matching = [stage for stage in stages if stage["stage"] == name]
         row[f"{name}_runs"] = len(matching)
@@ -114,6 +152,38 @@ def trial_row(result_file: Path, jobs_root: Path, condition_depth: int) -> dict[
         row[f"{name}_tokens"] = sum(stage["input_tokens"] + stage["cache_read_tokens"] + stage["output_tokens"] for stage in matching) if matching else None
         row[f"{name}_tool_calls"] = sum(stage["tool_calls"] for stage in matching) if matching else None
     return row
+
+
+def tool_call_rows(row: dict[str, Any], trial_dir: Path) -> list[dict[str, Any]]:
+    """Full records from tool-calls.jsonl; falls back to the compact provenance events."""
+    state = trial_dir / "agent" / "pimas"
+    entries = read_events(state / "tool-calls.jsonl")
+    if not entries:
+        entries = [
+            {"stageId": event["stageId"], **event["call"]}
+            for event in read_events(state / "provenance.jsonl")
+            if event.get("type") == "tool_call"
+        ]
+    rows = []
+    for entry in entries:
+        args = entry.get("args")
+        command = args.get("command") if isinstance(args, dict) else None
+        rows.append({
+            "condition": row["condition"],
+            "replicate": row["replicate"],
+            "task": row["task"],
+            "trial": row["trial"],
+            "stage": entry.get("stageId"),
+            "step": entry.get("stepId"),
+            "tool": entry.get("tool"),
+            "seconds": entry["durationMs"] / 1000 if isinstance(entry.get("durationMs"), (int, float)) else None,
+            "is_error": entry.get("isError"),
+            "started_at": entry.get("startedAt"),
+            "command": command[:300] if isinstance(command, str) else None,
+            "args_chars": len(json.dumps(args)) if args is not None else None,
+            "output_chars": len(entry["output"]) if isinstance(entry.get("output"), str) else None,
+        })
+    return rows
 
 
 def bootstrap_ci(values: list[float], samples: int = 2000, seed: int = 0) -> tuple[float | None, float | None]:
@@ -181,18 +251,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("jobs", type=Path, help="Folder containing Harbor job folders")
     parser.add_argument("--rows", type=Path, help="Per-trial CSV (default: stdout)")
     parser.add_argument("--summary", type=Path, help="Per-condition CSV")
+    parser.add_argument("--tool-calls", type=Path, help="Per-tool-call CSV")
     parser.add_argument("--condition-depth", type=int, default=1, help="Path levels under JOBS that name a condition")
     args = parser.parse_args(argv)
     jobs_root = args.jobs.resolve()
-    rows = [
-        trial_row(result_file, jobs_root, args.condition_depth)
-        for result_file in sorted(jobs_root.rglob("result.json"))
-        # Job folders also hold a job-level result.json; trials are the ones with a verifier folder or agent folder.
+    # Job folders also hold a job-level result.json; trials are the ones with an agent or verifier folder.
+    trial_results = [
+        result_file for result_file in sorted(jobs_root.rglob("result.json"))
         if (result_file.parent / "agent").exists() or (result_file.parent / "verifier").exists()
     ]
+    rows = [trial_row(result_file, jobs_root, args.condition_depth) for result_file in trial_results]
     _write(args.rows, rows)
     if args.summary:
         _write(args.summary, summarize(rows))
+    if args.tool_calls:
+        _write(args.tool_calls, [
+            call for row, result_file in zip(rows, trial_results) for call in tool_call_rows(row, result_file.parent)
+        ])
     return 0
 
 

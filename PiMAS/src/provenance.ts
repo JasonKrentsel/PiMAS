@@ -3,6 +3,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { AgentRole } from "./agent-config.js";
+import type { FileChanges } from "./filesystem.js";
 
 export type StageName = "research" | "plan" | "execute" | "review" | "correct" | "solve";
 
@@ -33,14 +34,31 @@ export interface StageArtifact {
   latencyMs: number;
   usage: Usage;
   toolCalls: ToolCallRecord[];
-  /** Workspace files created or modified while the stage ran; null when the probe failed. */
+  /** Files under the task working directory created or modified during the stage. */
   changedFiles: string[] | null;
+  /** Every file created, modified, or deleted anywhere in the workspace filesystem; null when untracked. */
+  fileChanges: FileChanges | null;
   sessionFile: string | null;
 }
 
+/** Complete input and output of one tool call, kept apart from the compact provenance stream. */
+export interface ToolCallOutput {
+  stageId: string;
+  toolCallId: string;
+  tool: string;
+  stepId: string | null;
+  args: unknown;
+  output: string;
+  isError: boolean;
+  durationMs: number | null;
+  startedAt: string;
+  endedAt: string;
+}
+
 export type ProvenanceEvent =
-  | { type: "run_start"; mode: string; review: boolean; request: string }
-  | { type: "stage_start"; id: string; stage: StageName; role: AgentRole; parents: string[] }
+  | { type: "run_start"; mode: string; review: boolean; request: string; settings: Record<string, unknown> }
+  | { type: "stage_start"; id: string; stage: StageName; role: AgentRole; parents: string[]; prompt: string; promptSha256: string }
+  | { type: "stage_session"; id: string; sessionFile: string | null }
   | { type: "tool_call"; stageId: string; call: ToolCallRecord }
   | { type: "stage_end"; artifact: StageArtifact }
   | { type: "run_end"; status: string; durationMs: number };
@@ -51,17 +69,27 @@ export type ProvenanceEvent =
  */
 export class ProvenanceLog {
   readonly file: string;
+  readonly toolOutputFile: string;
   private pending: Promise<void> = Promise.resolve();
 
   constructor(directory: string) {
     this.file = path.join(directory, "provenance.jsonl");
+    this.toolOutputFile = path.join(directory, "tool-calls.jsonl");
   }
 
   record(event: ProvenanceEvent): Promise<void> {
-    const line = JSON.stringify({ time: new Date().toISOString(), ...event }) + "\n";
+    return this.append(this.file, { time: new Date().toISOString(), ...event });
+  }
+
+  recordToolOutput(entry: ToolCallOutput): Promise<void> {
+    return this.append(this.toolOutputFile, entry);
+  }
+
+  private append(file: string, value: unknown): Promise<void> {
+    const line = JSON.stringify(value) + "\n";
     this.pending = this.pending.then(async () => {
-      await mkdir(path.dirname(this.file), { recursive: true });
-      await appendFile(this.file, line);
+      await mkdir(path.dirname(file), { recursive: true });
+      await appendFile(file, line);
     });
     return this.pending;
   }

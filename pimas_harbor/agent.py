@@ -16,6 +16,10 @@ environment:
     PIMAS_REVIEW           1 to add the reviewer stage (default: 0)
     PIMAS_MAX_CORRECTIONS  executor corrections after a rejection (default: 1)
     PIMAS_NODE             node executable (default: node)
+    PIMAS_SNAPSHOT_ROOT    directory tracked for per-stage file changes (default: /; "none" disables)
+    PIMAS_RUN_SNAPSHOT     0 skips the whole-container manifests before and after the run (default: 1)
+
+Everything a trial produces is under its ``agent/pimas/`` folder; see pimas_harbor/README.md.
 
 The model is chosen by the agents file, not by ``-m``; ``-m`` only labels the run.
 """
@@ -36,6 +40,7 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from pimas_harbor.provenance import read_events, run_status, session_usage, stage_summaries
+from pimas_harbor.records import RunFilesystem, code_identity, now, snapshot_config, write_run_info
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # Margin on top of the in-container `timeout` so Harbor's own exec timeout fires last.
@@ -59,10 +64,24 @@ class PimasAgent(BaseAgent):
         value = self._get_env(key)
         return value if value not in (None, "") else default
 
-    def _bridge_command(self, state: Path) -> tuple[list[str], Path]:
+    def _settings(self) -> dict[str, str]:
+        return {
+            "mode": self._setting("PIMAS_MODE", "pipeline"),
+            "review": self._setting("PIMAS_REVIEW", "0"),
+            "max_corrections": self._setting("PIMAS_MAX_CORRECTIONS", "1"),
+            "snapshot_root": self._setting("PIMAS_SNAPSHOT_ROOT", "/"),
+            "run_snapshot": self._setting("PIMAS_RUN_SNAPSHOT", "1"),
+        }
+
+    def _paths(self) -> tuple[Path, Path, Path]:
         root = Path(self._setting("PIMAS_ROOT", str(REPO_ROOT / "PiMAS"))).resolve()
         models = Path(self._setting("PIMAS_MODELS", str(REPO_ROOT / "config/pipeline/models.json"))).resolve()
         agents = Path(self._setting("PIMAS_AGENTS", str(REPO_ROOT / "config/pipeline/agents.json"))).resolve()
+        return root, models, agents
+
+    def _bridge_command(self, state: Path) -> tuple[list[str], Path]:
+        root, models, agents = self._paths()
+        settings = self._settings()
         command = [
             self._setting("PIMAS_NODE", "node"),
             "--import", "tsx",
@@ -70,21 +89,48 @@ class PimasAgent(BaseAgent):
             "--models", str(models),
             "--agents", str(agents),
             "--state", str(state),
-            "--mode", self._setting("PIMAS_MODE", "pipeline"),
-            "--max-corrections", self._setting("PIMAS_MAX_CORRECTIONS", "1"),
+            "--mode", settings["mode"],
+            "--max-corrections", settings["max_corrections"],
+            "--snapshot-root", settings["snapshot_root"],
         ]
-        if self._setting("PIMAS_REVIEW", "0") not in ("0", "false", "False"):
+        if settings["review"] not in ("0", "false", "False"):
             command.append("--review")
         return command, root
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         state = self.logs_dir / "pimas"
         state.mkdir(parents=True, exist_ok=True)
+        (state / "instruction.md").write_text(instruction)
         cwd = (await environment.exec("pwd", timeout_sec=30)).stdout or ""
         cwd = cwd.strip() or "/app"
         has_timeout = (await environment.exec("command -v timeout", timeout_sec=30)).return_code == 0
 
         command, root = self._bridge_command(state)
+        _, models, agents = self._paths()
+        settings = self._settings()
+        info: dict[str, Any] = {
+            "schema_version": 1,
+            "agent": {"name": self.name(), "version": self.version()},
+            "model_label": self.model_name,
+            "harbor_session_id": self.session_id,
+            "harbor_context_id": str(self.context_id) if self.context_id else None,
+            "started_at": now(),
+            "code": code_identity(root),
+            "settings": settings,
+            "bridge_command": command,
+            "config": snapshot_config(state, models, agents),
+            "workspace_cwd": cwd,
+            "container_has_timeout": has_timeout,
+        }
+        # Written before the run so a killed trial still identifies its code and configuration.
+        write_run_info(state, info)
+        filesystem = RunFilesystem(environment, state) if settings["run_snapshot"] != "0" else None
+        if filesystem:
+            try:
+                info["filesystem_start"] = await filesystem.start()
+            except Exception as error:  # noqa: BLE001 - tracking must not stop the task attempt
+                info["filesystem_start"] = {"ok": False, "error": f"{type(error).__name__}: {error}"}
+
         stderr = (state / "bridge-stderr.txt").open("ab")
         process = await asyncio.create_subprocess_exec(
             *command,
@@ -105,6 +151,16 @@ class PimasAgent(BaseAgent):
             await relay.close()
             await _stop(process, finished)
             stderr.close()
+            info["bridge_exit_code"] = process.returncode
+            info["bridge_finished"] = finished
+            info["agent_finished_at"] = now()
+            if filesystem:
+                try:
+                    info["filesystem"] = await filesystem.finish()
+                except Exception as error:  # noqa: BLE001 - keep the trial's other records
+                    info["filesystem"] = {"error": f"{type(error).__name__}: {error}"}
+            info["finished_at"] = now()
+            write_run_info(state, info)
             self._populate(state, context)
 
     def _populate(self, state: Path, context: AgentContext) -> None:

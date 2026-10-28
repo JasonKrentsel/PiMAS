@@ -11,6 +11,7 @@ import { SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-a
 import { createRoleSession } from "../src/agent.js";
 import { loadAgentConfig, type AgentConfig } from "../src/agent-config.js";
 import { runPipeline } from "../src/pipeline.js";
+import { FileTracker, SNAPSHOT_DIR } from "../src/filesystem.js";
 import { createWorkspaceTools, localWorkspace } from "../src/workspace.js";
 
 interface ChatRequest {
@@ -169,7 +170,7 @@ test("the pipeline runs fixed stages and records provenance, step tags, and chan
   await writeFile(path.join(app.workspaceDir, "input.txt"), "41\n");
   const result = await runPipeline({
     directory: app.state, workspace: localWorkspace(app.workspaceDir), modelsFile: app.modelsFile,
-    roles: app.roles, request: "Write the successor of the number in input.txt to answer.txt.", review: true,
+    roles: app.roles, snapshotRoot: app.workspaceDir, request: "Write the successor of the number in input.txt to answer.txt.", review: true,
   });
 
   assert.equal(result.status, "completed");
@@ -197,14 +198,35 @@ test("the pipeline runs fixed stages and records provenance, step tags, and chan
     ["begin_step", "S1"], ["write", "S1"], ["bash", "S1"], ["submit_report", "S1"],
   ]);
   assert.deepEqual(execute!.changedFiles, [path.join(app.workspaceDir, "answer.txt")]);
+  assert.deepEqual(execute!.fileChanges?.created, [path.join(app.workspaceDir, "answer.txt")]);
+  assert.deepEqual([execute!.fileChanges?.modified, execute!.fileChanges?.deleted], [[], []]);
+  assert.ok((execute!.fileChanges?.overheadMs ?? -1) >= 0);
   assert.deepEqual(research!.changedFiles, []);
   assert.deepEqual(review!.changedFiles, []);
   assert.ok(execute!.usage.input > 0);
 
+  // Full tool inputs and outputs are kept separately from the compact provenance stream.
+  const outputs = (await readFile(path.join(app.state, "tool-calls.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  const bash = outputs.find((entry) => entry.stageId === "execute" && entry.tool === "bash");
+  assert.deepEqual(bash.args, { command: "cat answer.txt" });
+  assert.match(bash.output, /42/);
+  assert.equal(bash.stepId, "S1");
+  assert.equal(outputs.length, 2 + 1 + 4 + 2);
+
   const events = (await readFile(result.provenanceFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(events.map((event) => event.type).filter((type) => type !== "tool_call"), [
-    "run_start", "stage_start", "stage_end", "stage_start", "stage_end", "stage_start", "stage_end", "stage_start", "stage_end", "run_end",
+    "run_start",
+    ...["research", "plan", "execute", "review"].flatMap(() => ["stage_start", "stage_session", "stage_end"]),
+    "run_end",
   ]);
+  const runStart = events[0];
+  assert.equal(runStart.settings.toolCallBudgets.execute, 400);
+  assert.equal(runStart.settings.roles.researcher.model, "scripted-model");
+  const planStart = events.find((event) => event.type === "stage_start" && event.id === "plan");
+  assert.match(planStart.prompt, /input.txt contains 41/);
+  assert.match(planStart.promptSha256, /^[0-9a-f]{64}$/);
+  const planSession = events.find((event) => event.type === "stage_session" && event.id === "plan");
+  assert.equal(planSession.sessionFile, plan!.sessionFile);
   assert.equal(events.filter((event) => event.type === "tool_call").length, 2 + 1 + 4 + 2);
 });
 
@@ -223,7 +245,7 @@ test("a rejected review triggers one correction and a fresh review", TIMEOUT, as
   await writeFile(path.join(app.workspaceDir, "input.txt"), "41\n");
   const result = await runPipeline({
     directory: app.state, workspace: localWorkspace(app.workspaceDir), modelsFile: app.modelsFile,
-    roles: app.roles, request: "Write the successor.", review: true, maxCorrections: 1,
+    roles: app.roles, snapshotRoot: app.workspaceDir, request: "Write the successor.", review: true, maxCorrections: 1,
   });
   assert.equal(result.approved, true);
   assert.deepEqual(result.artifacts.map((artifact) => [artifact.id, artifact.parents]), [
@@ -251,7 +273,7 @@ test("plans citing unknown findings are rejected, and a stage without a submissi
   await writeFile(path.join(app.workspaceDir, "input.txt"), "41\n");
   const result = await runPipeline({
     directory: app.state, workspace: localWorkspace(app.workspaceDir), modelsFile: app.modelsFile,
-    roles: app.roles, request: "Task.",
+    roles: app.roles, snapshotRoot: app.workspaceDir, request: "Task.",
   });
   assert.equal(result.status, "incomplete");
   assert.deepEqual(result.artifacts.map((artifact) => artifact.status), ["submitted", "submitted", "missing"]);
@@ -274,7 +296,7 @@ test("a stage over its tool budget is stopped and told to submit", TIMEOUT, asyn
   });
   const result = await runPipeline({
     directory: app.state, workspace: localWorkspace(app.workspaceDir), modelsFile: app.modelsFile,
-    roles: app.roles, request: "Task.", toolCallBudgets: { research: 2 },
+    roles: app.roles, snapshotRoot: app.workspaceDir, request: "Task.", toolCallBudgets: { research: 2 },
   });
   const research = result.artifacts[0]!;
   assert.equal(research.status, "submitted");
@@ -310,6 +332,7 @@ test("the bridge relays every workspace command and writes a summary", TIMEOUT, 
   const child = spawn(process.execPath, [
     "--import", pathToFileURL(path.resolve("node_modules/tsx/dist/loader.mjs")).href, path.resolve("src/pipeline-bridge.ts"),
     "--models", app.modelsFile, "--agents", app.agentsFile, "--state", app.state, "--mode", "single",
+    "--snapshot-root", app.workspaceDir,
   ], { cwd: app.root, stdio: ["pipe", "pipe", "pipe"] });
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr += String(chunk); });
@@ -339,4 +362,29 @@ test("the bridge relays every workspace command and writes a summary", TIMEOUT, 
   assert.ok(relayed.some((command) => command.includes("echo 42 > answer.txt")));
   const summary = JSON.parse(await readFile(path.join(app.state, "summary.json"), "utf8"));
   assert.deepEqual(summary.artifacts.map((artifact: { id: string }) => artifact.id), ["solve"]);
+});
+
+test("file tracking reports created, modified, and deleted files and ignores its own manifests", TIMEOUT, async (t) => {
+  const app = await fixture(t, happyPath);
+  const workspace = localWorkspace(app.workspaceDir);
+  await writeFile(path.join(app.workspaceDir, "keep.txt"), "same");
+  await writeFile(path.join(app.workspaceDir, "edit.txt"), "short");
+  await writeFile(path.join(app.workspaceDir, "gone.txt"), "x");
+  const tracker = new FileTracker(workspace, app.workspaceDir, `test-${process.pid}`);
+  const before = await tracker.snapshot();
+  assert.ok(before?.file.startsWith(SNAPSHOT_DIR));
+  await writeFile(path.join(app.workspaceDir, "edit.txt"), "a longer body");
+  await rm(path.join(app.workspaceDir, "gone.txt"));
+  await mkdir(path.join(app.workspaceDir, "new dir"));
+  await writeFile(path.join(app.workspaceDir, "new dir", "made.txt"), "y");
+  const changes = await tracker.changesSince(before);
+  assert.deepEqual(changes && {
+    created: changes.created, modified: changes.modified, deleted: changes.deleted, total: changes.total, truncated: changes.truncated,
+  }, {
+    created: [path.join(app.workspaceDir, "new dir", "made.txt")],
+    modified: [path.join(app.workspaceDir, "edit.txt")],
+    deleted: [path.join(app.workspaceDir, "gone.txt")],
+    total: 3,
+    truncated: false,
+  });
 });

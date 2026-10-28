@@ -47,6 +47,7 @@ def stage_summaries(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "output_tokens": usage.get("output", 0),
             "tool_calls": calls.get(event["id"], 0),
             "changed_files": len(artifact["changedFiles"]) if artifact and artifact.get("changedFiles") is not None else None,
+            "tracking_overhead_ms": ((artifact or {}).get("fileChanges") or {}).get("overheadMs"),
         })
     return rows
 

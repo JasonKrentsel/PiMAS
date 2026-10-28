@@ -59,6 +59,8 @@ async function main(send: Send): Promise<PipelineResult> {
     models: { type: "string" }, agents: { type: "string" }, state: { type: "string" },
     mode: { type: "string", default: "pipeline" }, review: { type: "boolean", default: false },
     "max-corrections": { type: "string", default: "1" },
+    // Directory tracked for per-stage file changes inside the workspace; "none" disables it.
+    "snapshot-root": { type: "string", default: "/" },
   } });
   if (!values.models || !values.agents || !values.state) throw new Error("Provide explicit --models, --agents, and --state");
   if (values.mode !== "pipeline" && values.mode !== "single") throw new Error("--mode must be pipeline or single");
@@ -129,6 +131,7 @@ async function main(send: Send): Promise<PipelineResult> {
       mode: values.mode,
       review: values.review,
       maxCorrections,
+      snapshotRoot: values["snapshot-root"] === "none" ? null : values["snapshot-root"],
       signal: controller.signal,
     });
     await writeFile(path.join(state, "summary.json"), JSON.stringify(result, null, 2) + "\n");
