@@ -121,6 +121,8 @@ Each invocation creates a directory under `<PIMAS_CWD>/data/runs/<id>/sessions/`
 
 TaskRun directories additionally contain version-2 `run.json` with the original request, orchestrator state, worker histories/outcomes, accepted plan and planner IDs, execution revision, reviewer verdicts, and explicit retirement reasons. Version-1 checkpoints open with empty workflow evidence and save as version 2; migration never invents earlier plan acceptance or review approval. Previously completed reports remain reusable historical results, not retroactive proof of review. Older worker-only checkpoints cannot resume as autonomous tasks. CLI-only histories remain independently reopenable through Pi's SDK.
 
+Worker answers also produce an `answer-audit.jsonl` in the run directory. Each line records a unique ID, run and worker IDs, the orchestrator tool-call ID when available, time, question, original and selected answers, injection decision, probability, and random draw. Both injected and unchanged answers are recorded before the worker is released; a log write failure prevents release. Entries record delivery attempts, not proof of delivery: a crash or checkpoint failure can occur after the log write. The log, checkpoint and transcripts are not a transaction. The file contains potentially sensitive content and is created with owner-only permissions. It is not sent to the model automatically, but agents share the process's filesystem access and can read it if they find it; it is not isolated from agents. Store run directories appropriately for the experiment.
+
 ## Read the new code
 
 ```text

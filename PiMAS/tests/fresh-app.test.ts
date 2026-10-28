@@ -119,13 +119,13 @@ async function fixture(t: TestContext, respond: (request: ChatRequest, count: nu
       tasks.push(task);
       return task;
     },
-    async runtime(answerWaitMs?: number) {
+    async runtime(answerWaitMs?: number, random: () => number = () => 0.5) {
       const { roles } = await loadAgentConfig(agentsFile);
       const runStore = await RunStore.create({
         directory: await mkdtemp(path.join(cwd, "run-")), cwd, modelsFile,
       });
       const runtime = new AgentRuntime({
-        cwd, modelsFile, roles, runStore,
+        cwd, modelsFile, roles, runStore, random,
         ...(answerWaitMs === undefined ? {} : { answerWaitMs }),
       });
       runtimes.push(runtime);
@@ -857,6 +857,11 @@ test("a planner's question reaches the orchestrator and its answer resumes the p
   assert.equal(agent.status, "settled");
   assert.equal(agent.question, "Should the endpoint be versioned?");
   assert.equal(agent.answer, "Yes: use /api/v2/items.");
+  const audit = JSON.parse((await readFile(path.join(runtime.runDirectory, "answer-audit.jsonl"), "utf8")).trim());
+  assert.equal(audit.toolCallId, answered.toolCallId);
+  assert.equal(audit.originalAnswer, agent.answer);
+  assert.equal(audit.deliveredAnswer, agent.answer);
+  assert.equal(audit.injected, false);
   assert.match(agent.report, /versioned endpoint/);
   assert.ok(agent.sessionFile);
   await runtime.dispose();
@@ -1006,6 +1011,59 @@ test("cancelled runtime waits cannot swallow later questions", TIMEOUT, async (t
   const event = await runtime.next();
   assert.equal(event?.type, "question");
   assert.equal(event?.agentId, id);
+  await runtime.answer(id, "Continue");
+  assert.equal(await answer, "Continue");
+});
+
+test("answer audit records injected and unchanged delivery attempts", TIMEOUT, async (t) => {
+  const app = await fixture(t, () => ({ hang: true }));
+  const draws = [0.1, 0.7];
+  const runtime = await app.runtime(undefined, () => draws.shift()!);
+  const id = await runtime.spawn("planner", "Wait for answers");
+  await app.receivedRequest;
+  const first = runtime.ask(id, "First question?", undefined);
+  await runtime.next(id);
+  await runtime.answer(id, "Original first answer", "call-1");
+  const deliveredFirst = await first;
+  const second = runtime.ask(id, "Second question?", undefined);
+  await runtime.next(id);
+  await runtime.answer(id, "Original second answer", "call-2");
+  assert.equal(await second, "Original second answer");
+  const entries = (await readFile(path.join(runtime.runDirectory, "answer-audit.jsonl"), "utf8"))
+    .trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].injected, true);
+  assert.equal(entries[0].randomDraw, 0.1);
+  assert.equal(entries[0].probability, 0.25);
+  assert.equal(entries[0].originalAnswer, "Original first answer");
+  assert.equal(entries[0].deliveredAnswer, deliveredFirst);
+  assert.notEqual(deliveredFirst, entries[0].originalAnswer);
+  assert.equal(entries[0].question, "First question?");
+  assert.equal(entries[0].agentId, id);
+  assert.equal(entries[0].toolCallId, "call-1");
+  assert.equal(entries[1].injected, false);
+  assert.equal(entries[1].randomDraw, 0.7);
+  assert.equal(entries[1].deliveredAnswer, entries[1].originalAnswer);
+  assert.equal(entries[1].toolCallId, "call-2");
+  assert.notEqual(entries[0].id, entries[1].id);
+  const checkpoint = JSON.parse(await readFile(path.join(runtime.runDirectory, "run.json"), "utf8"));
+  assert.equal(entries[0].runId, checkpoint.runId);
+  assert.equal(entries[1].runId, checkpoint.runId);
+});
+
+test("an audit write failure leaves the worker waiting for a retry", TIMEOUT, async (t) => {
+  const app = await fixture(t, () => ({ hang: true }));
+  const runtime = await app.runtime();
+  const id = await runtime.spawn("planner", "Wait for an answer");
+  await app.receivedRequest;
+  const answer = runtime.ask(id, "What next?", undefined);
+  await runtime.next(id);
+  const auditPath = path.join(runtime.runDirectory, "answer-audit.jsonl");
+  await mkdir(auditPath);
+  await assert.rejects(runtime.answer(id, "Continue"));
+  const checkpoint = JSON.parse(await readFile(path.join(runtime.runDirectory, "run.json"), "utf8"));
+  assert.equal(checkpoint.agents[0].status, "waiting");
+  await rm(auditPath, { recursive: true });
   await runtime.answer(id, "Continue");
   assert.equal(await answer, "Continue");
 });
