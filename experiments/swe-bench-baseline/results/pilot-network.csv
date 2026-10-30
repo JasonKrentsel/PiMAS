@@ -1,0 +1,12 @@
+trial,stage,kind,calls
+astropy__astropy-14309__Do97QpS,execute,upstream,1
+django__django-12741__N8YRtFT,execute,other,2
+django__django-12741__N8YRtFT,plan,other,1
+django__django-13933__4Dz5ZkA,execute,other,2
+django__django-13933__4Dz5ZkA,plan,other,1
+pylint-dev__pylint-4970__KwCvpeJ,execute,upstream,1
+pytest-dev__pytest-5809__jjLygc2,research,other,2
+sympy__sympy-14711__9R8iip8,plan,other,1
+sympy__sympy-14711__9R8iip8,research,other,1
+sympy__sympy-14711__9R8iip8,research,upstream,8
+sympy__sympy-17655__NVqwJRA,execute,other,1

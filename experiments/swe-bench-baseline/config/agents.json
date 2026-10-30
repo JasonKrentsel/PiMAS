@@ -1,0 +1,39 @@
+{
+  "roles": {
+    "orchestrator": {
+      "provider": "vllm",
+      "model": "qwen3.8-27b",
+      "thinkingLevel": "medium",
+      "systemPrompt": "../../PiMAS/prompts/orchestrator.md",
+      "extensions": []
+    },
+    "researcher": {
+      "provider": "vllm",
+      "model": "qwen3.8-27b",
+      "thinkingLevel": "medium",
+      "systemPrompt": "../../PiMAS/prompts/pipeline/researcher.md",
+      "extensions": []
+    },
+    "planner": {
+      "provider": "vllm",
+      "model": "qwen3.8-27b",
+      "thinkingLevel": "medium",
+      "systemPrompt": "../../PiMAS/prompts/pipeline/planner.md",
+      "extensions": []
+    },
+    "executor": {
+      "provider": "vllm",
+      "model": "qwen3.8-27b",
+      "thinkingLevel": "medium",
+      "systemPrompt": "../../PiMAS/prompts/pipeline/executor.md",
+      "extensions": []
+    },
+    "reviewer": {
+      "provider": "vllm",
+      "model": "qwen3.8-27b",
+      "thinkingLevel": "medium",
+      "systemPrompt": "../../PiMAS/prompts/pipeline/reviewer.md",
+      "extensions": []
+    }
+  }
+}
