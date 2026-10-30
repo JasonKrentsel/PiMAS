@@ -31,8 +31,12 @@ Harbor ── pimas_harbor.agent:PimasAgent (Python, host) ── environment.ex
 - its parents
 - its conversation file
 - token usage
-- every tool call, tagged with the plan step the executor declared through `begin_step`
+- every tool call, tagged with the plan step the executor declared through `begin_step` (a `begin_step` call carries the step it opens)
 - every file it created, modified or deleted anywhere in the container
+- for executor stages, the same file changes split at each `begin_step` (`stepFileChanges`, also streamed as `step_files` events), so a step's effects, including those of shell commands, can be found and undone on their own
+- for stages with workspace tools, when the working directory is a git work tree: the cumulative `git diff HEAD` of that directory at stage end, saved as `patches/<stage>.diff`, plus the untracked files it does not cover
+
+File contents are not stored apart from these patches. Per-step token use is derived from the session files: each assistant message lists its tool-call IDs, and `tool-calls.jsonl` maps those to steps.
 
 **Budgets.**
 - Shell commands default to 600 s and are capped at 3600 s (`PIPELINE_COMMAND_LIMITS`).
@@ -51,7 +55,8 @@ Everything for one trial is in `jobs/<condition>/<replicate>/<trial>/`. Nothing 
 | `agent/pimas/run-info.json` | Git commit, branch and uncommitted files; Pi and Harbor versions; host; settings; config and prompt hashes; container working directory; bridge exit; whole-run file-change counts and scan times. Written before the run starts and updated at the end |
 | `agent/pimas/instruction.md` | The task instruction as given to the agent |
 | `agent/pimas/config/` | Copies of `models.json` (credentials redacted), `agents.json`, and each role's prompt as used |
-| `agent/pimas/provenance.jsonl` | Run settings (budgets, limits, role profiles), then per stage: start with prompt, session file, compact tool calls, end with the full artifact |
+| `agent/pimas/provenance.jsonl` | Run settings (budgets, limits, role profiles), then per stage: start with prompt, session file, compact tool calls, per-step file changes, end with the full artifact |
+| `agent/pimas/patches/<stage>.diff` | Working-directory `git diff HEAD` at the end of each stage with workspace tools (git work trees only; stops at 1 MiB) |
 | `agent/pimas/tool-calls.jsonl` | Every tool call with complete arguments and complete output text, step tag, error flag and timing |
 | `agent/pimas/sessions/*.jsonl` | Pi's complete conversation per stage: every message, tool call, tool result and token count |
 | `agent/pimas/summary.json` | All stage artifacts and totals; missing if the run was killed |
@@ -59,7 +64,7 @@ Everything for one trial is in `jobs/<condition>/<replicate>/<trial>/`. Nothing 
 | `agent/pimas/filesystem/changes.tsv.gz` | `C`/`M`/`D` lines: files created, modified, deleted during the run, anywhere in the container |
 | `agent/pimas/bridge-stderr.txt` | Pipeline diagnostics and errors |
 
-Manifests skip `/proc`, `/sys`, `/dev`, `/run`, Harbor's `/logs` mount, and the tracker's own `/tmp/.pimas`. Scanning time is recorded as tracking overhead. It counts against the task's agent timeout.
+Manifests skip `/proc`, `/sys`, `/dev`, `/run`, Harbor's `/logs` mount, and the tracker's own `/tmp/.pimas`. Scanning time is recorded as tracking overhead: each stage's `fileChanges.overheadMs` covers all of its scans, per-step diffs and patch. It counts against the task's agent timeout.
 
 ## Server setup (once)
 

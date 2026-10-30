@@ -36,9 +36,37 @@ export interface StageArtifact {
   toolCalls: ToolCallRecord[];
   /** Files under the task working directory created or modified during the stage. */
   changedFiles: string[] | null;
-  /** Every file created, modified, or deleted anywhere in the workspace filesystem; null when untracked. */
+  /**
+   * Every file created, modified, or deleted anywhere in the workspace filesystem; null when untracked.
+   * Its overheadMs is the stage's whole tracking cost, including per-step scans and the workspace patch.
+   */
   fileChanges: FileChanges | null;
+  /** Executor stages: the same changes split at each begin_step, in order; null for other stages or when untracked. */
+  stepFileChanges: StepFileChanges[] | null;
+  /** Cumulative `git diff HEAD` of the working directory at stage end; null when untracked or not a git work tree. */
+  workspacePatch: WorkspacePatch | null;
   sessionFile: string | null;
+}
+
+/** File changes between two step boundaries. `stepId` is null before the first begin_step. */
+export interface StepFileChanges {
+  stepId: string | null;
+  startedAt: string;
+  endedAt: string;
+  fileChanges: FileChanges | null;
+}
+
+export interface WorkspacePatch {
+  /** Patch file relative to the state directory. */
+  file: string;
+  /** SHA-256 of the saved patch text. */
+  sha256: string;
+  /** Size of the whole patch; the saved file stops at the limit when `truncated`. */
+  bytes: number;
+  truncated: boolean;
+  /** Untracked, non-ignored files, which the patch does not contain. */
+  untracked: string[];
+  overheadMs: number;
 }
 
 /** Complete input and output of one tool call, kept apart from the compact provenance stream. */
@@ -60,6 +88,7 @@ export type ProvenanceEvent =
   | { type: "stage_start"; id: string; stage: StageName; role: AgentRole; parents: string[]; prompt: string; promptSha256: string }
   | { type: "stage_session"; id: string; sessionFile: string | null }
   | { type: "tool_call"; stageId: string; call: ToolCallRecord }
+  | { type: "step_files"; stageId: string; segment: StepFileChanges }
   | { type: "stage_end"; artifact: StageArtifact }
   | { type: "run_end"; status: string; durationMs: number };
 

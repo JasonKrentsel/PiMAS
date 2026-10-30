@@ -54,7 +54,7 @@ The bridge binds checkpoints to a task/attempt/container identity and rejects ol
 
 ## Fixed-stage pipeline (Terminal-Bench baseline)
 
-`src/pipeline.ts` runs a fixed researcher → planner → executor (→ reviewer → correction) sequence instead of letting an orchestrator model choose spawns, so every run has the same stages and inputs. Each stage ends by calling a structured submit tool, and `provenance.jsonl` records submissions, parents, tool calls tagged by plan step, token usage, and workspace files changed. Native tools run through a `Workspace` (`src/workspace.ts`) rather than the host filesystem; `src/pipeline-bridge.ts` relays them to a Harbor task container. Running it on Terminal-Bench is described in [`../pimas_harbor/README.md`](../pimas_harbor/README.md). Stage prompts are in `prompts/pipeline/`; role profiles may add an optional `researcher` role.
+`src/pipeline.ts` runs a fixed researcher → planner → executor (→ reviewer → correction) sequence instead of letting an orchestrator model choose spawns, so every run has the same stages and inputs. Each stage ends by calling a structured submit tool, and `provenance.jsonl` records submissions, parents, tool calls tagged by plan step, token usage, files changed per stage and per plan step, and a git patch of the working directory per stage. Native tools run through a `Workspace` (`src/workspace.ts`) rather than the host filesystem; `src/pipeline-bridge.ts` relays them to a Harbor task container. Running it on Terminal-Bench is described in [`../pimas_harbor/README.md`](../pimas_harbor/README.md). Stage prompts are in `prompts/pipeline/`; role profiles may add an optional `researcher` role.
 
 ## Existing inspection CLI
 

@@ -1,20 +1,23 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Type, type Usage } from "@earendil-works/pi-ai";
 import { defineTool, SessionManager, type AgentSession, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createRoleSession, type Toolset } from "./agent.js";
 import type { AgentConfig, AgentRole } from "./agent-config.js";
 import type { CommandLimits } from "./execution-tools.js";
-import { FileTracker } from "./filesystem.js";
+import { FileTracker, SNAPSHOT_DIR, type Snapshot } from "./filesystem.js";
 import {
   contentDigest,
   ProvenanceLog,
   type StageArtifact,
   type StageName,
+  type StepFileChanges,
   type ToolCallRecord,
+  type WorkspacePatch,
 } from "./provenance.js";
 import { collectUsage } from "./runtime.js";
-import type { Workspace } from "./workspace.js";
+import { shellQuote, type Workspace } from "./workspace.js";
 
 /**
  * Fixed-topology alternative to TaskRun: host code, not an orchestrator model, decides
@@ -199,12 +202,39 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
     prompt: spec.prompt, promptSha256: contentDigest(spec.prompt),
   });
   const startedAt = new Date();
-  const before = await context.tracker?.snapshot() ?? null;
+  const tracker = context.tracker;
+  let trackingMs = 0;
+  const timed = async <R>(work: () => Promise<R>): Promise<R> => {
+    const began = Date.now();
+    try { return await work(); } finally { trackingMs += Date.now() - began; }
+  };
+  const before = tracker ? await timed(() => tracker.snapshot()) : null;
 
   let submission: T | undefined;
   let currentStep: string | null = null;
+  // Executor stages also split their file changes at each begin_step, so a step's effects can be undone on their own.
+  const stepFileChanges: StepFileChanges[] | null = spec.stepTracking && tracker ? [] : null;
+  let stepSnapshot = before;
+  let stepStartedAt = startedAt.toISOString();
+  const closeStep = async (after: Snapshot | null) => {
+    if (!stepFileChanges || !tracker) return;
+    const segment: StepFileChanges = {
+      stepId: currentStep, startedAt: stepStartedAt, endedAt: new Date().toISOString(),
+      fileChanges: await timed(() => tracker.diff(stepSnapshot, after)),
+    };
+    if (stepSnapshot !== before) await timed(() => tracker.discard(stepSnapshot));
+    stepSnapshot = after;
+    stepStartedAt = segment.endedAt;
+    stepFileChanges.push(segment);
+    await log.record({ type: "step_files", stageId: spec.id, segment });
+  };
   const tools = [spec.submitTool((value) => { submission = value; })];
-  if (spec.stepTracking) tools.push(beginStepTool(spec.stepTracking, (stepId) => { currentStep = stepId; }));
+  if (spec.stepTracking) {
+    tools.push(beginStepTool(spec.stepTracking, async (stepId) => {
+      if (stepFileChanges && tracker) await closeStep(await timed(() => tracker.snapshot()));
+      currentStep = stepId;
+    }));
+  }
 
   const toolCalls: ToolCallRecord[] = [];
   let session: AgentSession | undefined;
@@ -237,7 +267,9 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
         starts.delete(event.toolCallId);
         const call: ToolCallRecord = {
           toolCallId: event.toolCallId, tool: event.toolName,
-          stepId: start?.stepId ?? currentStep, args: truncate(JSON.stringify(start?.args) ?? "", 2000),
+          // begin_step belongs to the step it opens, not the one that was active when it was called.
+          stepId: event.toolName === "begin_step" ? currentStep : start?.stepId ?? currentStep,
+          args: truncate(JSON.stringify(start?.args) ?? "", 2000),
           isError: event.isError, durationMs: event.durationMs ?? null,
           startedAt: start?.startedAt ?? new Date().toISOString(),
         };
@@ -275,7 +307,12 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
     error = caught instanceof Error ? caught.message : String(caught);
   }
 
-  const fileChanges = await context.tracker?.changesSince(before) ?? null;
+  const after = tracker ? await timed(() => tracker.snapshot()) : null;
+  await closeStep(after);
+  const fileChanges = tracker ? await timed(() => tracker.diff(before, after)) : null;
+  if (tracker) await timed(() => tracker.discard(before, after));
+  const workspacePatch = tracker && spec.toolset !== "none" ? await timed(() => saveWorkspacePatch(options, spec.id)) : null;
+  if (fileChanges) fileChanges.overheadMs = trackingMs;
   const cwdPrefix = options.workspace.cwd.endsWith("/") ? options.workspace.cwd : `${options.workspace.cwd}/`;
   const endedAt = new Date();
   const artifact: StageArtifact = {
@@ -296,6 +333,8 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
       ? [...fileChanges.created, ...fileChanges.modified].filter((file) => file.startsWith(cwdPrefix)).sort()
       : null,
     fileChanges,
+    stepFileChanges,
+    workspacePatch,
     sessionFile: session?.sessionManager.getSessionFile() ?? null,
   };
   if (session) {
@@ -363,7 +402,7 @@ function planTool(findings: Findings): StageSpec<Plan>["submitTool"] {
   }) as unknown as ToolDefinition;
 }
 
-function beginStepTool(steps: PlanStep[], begin: (stepId: string) => void): ToolDefinition {
+function beginStepTool(steps: PlanStep[], begin: (stepId: string) => Promise<void>): ToolDefinition {
   const known = new Set([...steps.map((step) => step.id), UNPLANNED_STEP]);
   return defineTool({
     name: "begin_step",
@@ -373,7 +412,7 @@ function beginStepTool(steps: PlanStep[], begin: (stepId: string) => void): Tool
     executionMode: "sequential",
     async execute(_id, params) {
       if (!known.has(params.stepId)) throw new Error(`Unknown step ${params.stepId}. Known: ${[...known].join(", ")}.`);
-      begin(params.stepId);
+      await begin(params.stepId);
       return { content: [{ type: "text", text: `Now working on ${params.stepId}.` }], details: { stepId: params.stepId } };
     },
   }) as unknown as ToolDefinition;
@@ -458,6 +497,45 @@ function correctionPrompt(
 }
 
 // --- Helpers -----------------------------------------------------------------------
+
+const MAX_PATCH_BYTES = 1024 * 1024;
+const MAX_UNTRACKED_FILES = 2000;
+const PATCH_MARKER = "--- pimas patch ---";
+
+/**
+ * Saves the working directory's cumulative `git diff HEAD`, limited to that directory and with paths
+ * relative to it, under patches/<stage>.diff, so each
+ * stage's source edits can be read or reverted without storing file contents. --no-optional-locks
+ * keeps git from rewriting the index. Null outside a git work tree.
+ */
+async function saveWorkspacePatch(options: PipelineOptions, stageId: string): Promise<WorkspacePatch | null> {
+  const started = Date.now();
+  const temp = shellQuote(`${SNAPSHOT_DIR}/patch-${randomUUID().slice(0, 8)}.diff`);
+  const git = "git --no-optional-locks -c core.quotepath=off";
+  try {
+    const result = await options.workspace.exec(
+      `cd ${shellQuote(options.workspace.cwd)} && git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 3; `
+        + `mkdir -p ${shellQuote(SNAPSHOT_DIR)} && ${git} diff HEAD --relative --no-color --no-ext-diff -- . > ${temp} 2>/dev/null; `
+        + `wc -c < ${temp}; ${git} ls-files --others --exclude-standard | head -n ${MAX_UNTRACKED_FILES}; `
+        + `echo ${shellQuote(PATCH_MARKER)}; head -c ${MAX_PATCH_BYTES} ${temp}; rm -f ${temp}`,
+      { timeoutSeconds: 120 },
+    );
+    const marker = result.stdout.indexOf(`\n${PATCH_MARKER}\n`);
+    if (result.exitCode !== 0 || marker < 0) return null;
+    const [bytes = "0", ...untracked] = result.stdout.slice(0, marker).split("\n");
+    const patch = result.stdout.slice(marker + PATCH_MARKER.length + 2);
+    const file = path.join("patches", `${stageId}.diff`);
+    await mkdir(path.join(options.directory, "patches"), { recursive: true });
+    await writeFile(path.join(options.directory, file), patch);
+    const total = Number(bytes.trim()) || 0;
+    return {
+      file, sha256: createHash("sha256").update(patch).digest("hex"), bytes: total,
+      truncated: total > Buffer.byteLength(patch), untracked: untracked.filter(Boolean), overheadMs: Date.now() - started,
+    };
+  } catch {
+    return null;
+  }
+}
 
 /** Text parts of a tool result; images and other parts are noted, not embedded. */
 function resultText(result: unknown): string {

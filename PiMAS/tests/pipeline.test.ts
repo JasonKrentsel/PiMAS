@@ -216,9 +216,13 @@ test("the pipeline runs fixed stages and records provenance, step tags, and chan
   const events = (await readFile(result.provenanceFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(events.map((event) => event.type).filter((type) => type !== "tool_call"), [
     "run_start",
-    ...["research", "plan", "execute", "review"].flatMap(() => ["stage_start", "stage_session", "stage_end"]),
+    ...["research", "plan"].flatMap(() => ["stage_start", "stage_session", "stage_end"]),
+    // One segment before begin_step S1, one for S1.
+    "stage_start", "stage_session", "step_files", "step_files", "stage_end",
+    "stage_start", "stage_session", "stage_end",
     "run_end",
   ]);
+  assert.equal(research!.stepFileChanges, null);
   const runStart = events[0];
   assert.equal(runStart.settings.toolCallBudgets.execute, 400);
   assert.equal(runStart.settings.roles.researcher.model, "scripted-model");
@@ -228,6 +232,71 @@ test("the pipeline runs fixed stages and records provenance, step tags, and chan
   const planSession = events.find((event) => event.type === "stage_session" && event.id === "plan");
   assert.equal(planSession.sessionFile, plan!.sessionFile);
   assert.equal(events.filter((event) => event.type === "tool_call").length, 2 + 1 + 4 + 2);
+});
+
+test("executor file changes are split by plan step, and each stage saves the working tree's git patch", TIMEOUT, async (t) => {
+  const app = await fixture(t, (stage, turn, request) => {
+    if (stage === "plan") {
+      return turn === 0
+        ? { tool: "submit_plan", args: { summary: "Two steps.", steps: [
+          { action: "Write 42 to answer.txt", uses: ["F1"], check: "cat answer.txt" },
+          { action: "Append 41 to input.txt", uses: ["F1"], check: "cat input.txt" },
+        ] } }
+        : { text: "plan done." };
+    }
+    if (stage === "execute") {
+      return [
+        { tool: "begin_step", args: { stepId: "S1" } },
+        { tool: "write", args: { path: "answer.txt", content: "42\n" } },
+        { tool: "begin_step", args: { stepId: "S2" } },
+        { tool: "bash", args: { command: "echo 41 >> input.txt" } },
+        { tool: "submit_report", args: { summary: "Done.", steps: [
+          { stepId: "S1", status: "done", evidence: "wrote answer.txt" }, { stepId: "S2", status: "done", evidence: "appended" },
+        ] } },
+      ][turn] ?? { text: "execute done." };
+    }
+    return happyPath(stage, turn, request);
+  });
+  await writeFile(path.join(app.workspaceDir, "input.txt"), "41\n");
+  const git = (command: string) => localWorkspace(app.workspaceDir).exec(
+    `git -c user.name=t -c user.email=t@t ${command}`,
+  ).then((result) => assert.equal(result.exitCode, 0, result.stderr));
+  await git("init -q");
+  await git("add input.txt");
+  await git("commit -q -m base");
+
+  const result = await runPipeline({
+    directory: app.state, workspace: localWorkspace(app.workspaceDir), modelsFile: app.modelsFile,
+    roles: app.roles, snapshotRoot: app.workspaceDir, request: "Task.",
+  });
+  assert.equal(result.status, "completed");
+  const [research, plan, execute] = result.artifacts;
+
+  assert.deepEqual(execute!.toolCalls.map((call) => [call.tool, call.stepId]), [
+    ["begin_step", "S1"], ["write", "S1"], ["begin_step", "S2"], ["bash", "S2"], ["submit_report", "S2"],
+  ]);
+  const file = (name: string) => path.join(app.workspaceDir, name);
+  assert.deepEqual(execute!.stepFileChanges?.map((segment) => [
+    segment.stepId, segment.fileChanges?.created, segment.fileChanges?.modified, segment.fileChanges?.deleted,
+  ]), [
+    [null, [], [], []],
+    ["S1", [file("answer.txt")], [], []],
+    ["S2", [], [file("input.txt")], []],
+  ]);
+  assert.deepEqual(execute!.fileChanges?.created, [file("answer.txt")]);
+  assert.deepEqual(execute!.fileChanges?.modified, [file("input.txt")]);
+  assert.ok((execute!.fileChanges?.overheadMs ?? 0) >= (execute!.stepFileChanges?.[2]?.fileChanges?.overheadMs ?? 0));
+
+  assert.equal(plan!.workspacePatch, null);
+  assert.deepEqual(research!.workspacePatch && [research!.workspacePatch.bytes, research!.workspacePatch.untracked], [0, []]);
+  const patch = execute!.workspacePatch!;
+  assert.equal(patch.file, path.join("patches", "execute.diff"));
+  const text = await readFile(path.join(app.state, patch.file), "utf8");
+  assert.match(text, /^\+41$/m);
+  assert.equal(patch.bytes, Buffer.byteLength(text));
+  assert.equal(patch.truncated, false);
+  assert.deepEqual(patch.untracked, ["answer.txt"]);
+  assert.match(patch.sha256, /^[0-9a-f]{64}$/);
 });
 
 test("a rejected review triggers one correction and a fresh review", TIMEOUT, async (t) => {

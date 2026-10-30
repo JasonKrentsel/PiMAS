@@ -66,15 +66,22 @@ export class FileTracker {
   /** Changes since `before`. Both manifests are removed afterwards. */
   async changesSince(before: Snapshot | null): Promise<FileChanges | null> {
     if (!before) return null;
+    const after = await this.snapshot();
+    const changes = await this.diff(before, after);
+    await this.discard(before, after);
+    if (changes) changes.overheadMs += before.scanMs;
+    return changes;
+  }
+
+  /** Changes from `before` to `after`; both manifests are kept. Overhead is `after`'s scan plus the diff. */
+  async diff(before: Snapshot | null, after: Snapshot | null): Promise<FileChanges | null> {
+    if (!before || !after) return null;
     const started = Date.now();
-    const snapshot = await this.snapshot();
-    if (!snapshot) return null;
-    const after = snapshot.file;
-    const diff = `${after}.diff`;
+    const diff = `${after.file}.diff`;
     try {
       const result = await this.workspace.exec(
-        `${diffCommand(before.file, after, diff)} && wc -l < ${shellQuote(diff)} && head -n ${MAX_LISTED_CHANGES} ${shellQuote(diff)}; `
-          + `rm -f ${shellQuote(before.file)} ${shellQuote(after)} ${shellQuote(diff)}`,
+        `${diffCommand(before.file, after.file, diff)} && wc -l < ${shellQuote(diff)} && head -n ${MAX_LISTED_CHANGES} ${shellQuote(diff)}; `
+          + `rm -f ${shellQuote(diff)}`,
         { timeoutSeconds: SCAN_TIMEOUT_SECONDS },
       );
       if (result.exitCode !== 0) return null;
@@ -92,10 +99,20 @@ export class FileTracker {
         else if (kind === "D") changes.deleted.push(file);
       }
       changes.truncated = changes.total > changes.created.length + changes.modified.length + changes.deleted.length;
-      changes.overheadMs = before.scanMs + (Date.now() - started);
+      changes.overheadMs = after.scanMs + (Date.now() - started);
       return changes;
     } catch {
       return null;
+    }
+  }
+
+  async discard(...snapshots: (Snapshot | null)[]): Promise<void> {
+    const files = snapshots.flatMap((snapshot) => (snapshot ? [shellQuote(snapshot.file)] : []));
+    if (!files.length) return;
+    try {
+      await this.workspace.exec(`rm -f ${files.join(" ")}`, { timeoutSeconds: SCAN_TIMEOUT_SECONDS });
+    } catch {
+      // Leftover manifests are pruned from later scans and go away with the container.
     }
   }
 }
