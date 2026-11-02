@@ -1,0 +1,14 @@
+{
+  "source": "swe-baseline/matplotlib__matplotlib-24149__CTqFNUC",
+  "replay": {},
+  "fault": {
+    "id": "research-lost",
+    "class": "accidental",
+    "type": "timeout",
+    "target": {
+      "kind": "stage",
+      "stage": "research"
+    },
+    "action": "drop"
+  }
+}

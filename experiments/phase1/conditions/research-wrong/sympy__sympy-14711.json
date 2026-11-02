@@ -1,0 +1,125 @@
+{
+  "source": "swe-baseline/sympy__sympy-14711__94PbQUv",
+  "replay": {
+    "research": {
+      "summary": "The task is to fix a bug in the SymPy source tree at /testbed (sympy 1.1.2.dev, git HEAD a0bbae0b2 \"SWE-bench\"): `sum([N.x, 0*N.x])` raises `TypeError: A Vector must be supplied`. Root cause (verified by running in the testbed conda env): `0*N.x` is a valid zero Vector (args=[]), but `sum()` starts from the int 0, so the first operation is `0 + N.x`, which dispatches to `Vector.__radd__` (alias of `__add__`, vector.py:452) with `other=0`; `__add__` (vector.py:58-61) calls `_check_vector` (vector.py:723-726), which rejects any non-Vector and raises TypeError. Related broken ops: `N.x - 0` and `0 - N.x` (both funnel into `__add__` via `__sub__` line 385-387 and `__rsub__` line 340-341). A fix in `__add__` (or in `_check_vector`, noting it is shared by frame.py/point.py/dyadic.py/functions.py/fieldfunctions.py) to treat `other == 0` as a zero Vector would fix `sum()`, and `__sub__`/`__rsub__` for free. Codebase precedent: `Vector.__init__` explicitly supports `Vector(0)` and `__eq__` maps `other == 0` to `Vector(0)`. Testing: pytest is NOT installed; use the env python `/opt/miniconda3/envs/testbed/bin/python` with sympy's own runner `bin/test` (verified: test_vector.py currently passes 4/4). Tests for this module live in sympy/physics/vector/tests/test_vector.py.",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "Workspace /testbed is the SymPy source repo at git commit a0bbae0b2e7de1110db52bdc844d0e15fe1458fb (\"SWE-bench\"), 3622 commits after tag sympy-1.1.1, with version string '1.1.2.dev'; working tree is clean.",
+          "evidence": "git log -1 --format=\"%H %s\" -> 'a0bbae0b2e7de1110db52bdc844d0e15fe1458fb SWE-bench'; git describe --tags -> 'sympy-1.1.1-3622-ga0bbae0b2'; git status -> 'nothing to commit, working tree clean'; grep __version__ sympy/release.py -> '1:__version__ = \"1.1.2.dev\"'"
+        },
+        {
+          "id": "F2",
+          "claim": "The functional Python environment is the conda env at /opt/miniconda3/envs/testbed (Python 3.9.20) with mpmath 1.3.0 and sympy installed editable from /testbed; the default python (3.11.5 at /opt/miniconda3/bin) lacks mpmath and cannot import sympy, so all test runs must use /opt/miniconda3/envs/testbed/bin/python.",
+          "evidence": "conda env list -> 'testbed  /opt/miniconda3/envs/testbed'; /opt/miniconda3/envs/testbed/bin/pip list -> 'mpmath 1.3.0', 'sympy 1.1.2.dev0 /testbed'; python -c \"import sympy\" under default python -> \"ModuleNotFoundError: No module named 'mpmath'\"; site-packages of testbed env contains 'sympy.egg-link' and 'easy-install.pth'"
+        },
+        {
+          "id": "F3",
+          "claim": "pytest is NOT installed in the testbed env, but sympy's bundled test runner works and the vector test file currently passes 4/4.",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/python -c \"import pytest\" -> ModuleNotFoundError; running 'cd /testbed && /opt/miniconda3/envs/testbed/bin/python bin/test sympy/physics/vector/tests/test_vector.py' -> 'sympy/physics/vector/tests/test_vector.py[4] ....  [OK]' and 'tests finished: 4 passed, in 0.34 seconds'"
+        },
+        {
+          "id": "F4",
+          "claim": "The reported bug reproduces in this environment: with N = ReferenceFrame('N'), sum([N.x, (0 * N.x)]) raises TypeError: A Vector must be supplied, with the traceback going through Vector.__add__ at sympy/physics/vector/vector.py line 60 into _check_vector at line 725.",
+          "evidence": "Reproduced via /opt/miniconda3/envs/testbed/bin/python: \"REPRODUCED sum TypeError: A Vector must be supplied\"; earlier unfiltered run showed 'File \"/testbed/sympy/physics/vector/vector.py\", line 60, in __add__ ... line 725, in _check_vector raise TypeError(\\'A Vector must be supplied\\')'"
+        },
+        {
+          "id": "F5",
+          "claim": "Root cause: 0*N.x is a valid zero Vector (type Vector, args == [], repr '0') and Vector+Vector addition works; the failure is the int zero: `0 + N.x` dispatches to Vector.__radd__ (aliased to __add__) with other=0, which _check_vector rejects. Confirmed: N.x + (0*N.x) == N.x and (0*N.x) + N.x == N.x succeed, while 0 + N.x raises TypeError.",
+          "evidence": "Env python run printed: \"type(0*N.x): Vector args: []\", \"N.x + z = N.x\", \"z + N.x = N.x\", \"0 + N.x TypeError: A Vector must be supplied\""
+        },
+        {
+          "id": "F6",
+          "claim": "Related operations are also broken by the same root cause: `N.x - 0` and `0 - N.x` both raise TypeError: A Vector must be supplied, because __sub__ (vector.py:385-387) is `return self.__add__(other * -1)` (0*-1 == 0) and __rsub__ (vector.py:340-341) is `return (-1 * self) + other` (other == 0).",
+          "evidence": "Env python run printed: \"0 - N.x TypeError: A Vector must be supplied\" and \"N.x - 0 TypeError: A Vector must be supplied\""
+        },
+        {
+          "id": "F7",
+          "claim": "The guard function _check_vector is at sympy/physics/vector/vector.py:723-726 (raises TypeError('A Vector must be supplied') for any non-Vector) and is called at vector.py lines 60 (__add__), 94 (__and__), 127 (__eq__), 196 (__or__), 322 (__ror__), 420 (__xor__); it is also imported and used in dyadic.py (lines 87, 95, 275-276, 305-306, 369-370), functions.py (line 500), point.py (lines 212, 271, 301, 331), frame.py (lines 540, 735, 771), and fieldfunctions.py (lines 41, 85), so changing _check_vector affects all those modules.",
+          "evidence": "sed -n '723,726p' sympy/physics/vector/vector.py shows the function body; grep -rn \"_check_vector\" sympy/ (excluding tests) lists all call sites above"
+        },
+        {
+          "id": "F8",
+          "claim": "The codebase already has an established convention for zero: Vector.__init__ (vector.py:26-52) accepts inlist == 0 and the docstring says 'The only exception is to create a zero vector: zv = Vector(0)'; Vector.__eq__ (vector.py:112-138) maps `other == 0` to Vector(0) so `Vector(0) == 0` is True; Vector.__radd__/__rand__/__rmul__ are plain aliases set at vector.py:452-454.",
+          "evidence": "vector.py:33-34 'if inlist == 0: inlist = []'; vector.py:117-119 'if other == 0: other = Vector(0)'; env run printed 'Vector(0) == 0: True'; grep -n shows \"452:    __radd__ = __add__\", \"453:    __rand__ = __and__\", \"454:    __rmul__ = __mul__\""
+        },
+        {
+          "id": "F9",
+          "claim": "Vector is a plain Python object (class Vector(object), vector.py:10), not a sympy Expr, so there is no sympify/Expr fallback for scalar operands; scalar handling (e.g. accepting 0) must be added explicitly in the Vector methods.",
+          "evidence": "grep -n \"class Vector\" sympy/physics/vector/vector.py -> '10:class Vector(object):'"
+        },
+        {
+          "id": "F10",
+          "claim": "The existing test file for this module is /testbed/sympy/physics/vector/tests/test_vector.py with 4 test functions (test_Vector at line 11, test_Vector_diffs at line 62, test_vector_var_in_dcm at line 129, test_vector_simplify at line 148); it already references Vector(0) (line 53: assert Vector(0).separate() == {}) and imports raises from sympy.utilities.pytest; a new regression test for adding 0 would naturally go here.",
+          "evidence": "grep -n \"def test_\" sympy/physics/vector/tests/test_vector.py lists those 4 defs; sed of line 53 shows 'assert Vector(0).separate() == {}'; line 6 'from sympy.utilities.pytest import raises'"
+        }
+      ]
+    }
+  },
+  "fault": {
+    "id": "research-wrong",
+    "class": "accidental",
+    "type": "incorrect",
+    "target": {
+      "kind": "stage",
+      "stage": "research"
+    },
+    "action": "replace",
+    "findings": {
+      "summary": "The task is to fix a bug in the SymPy source tree at /testbed (sympy 1.1.2.dev, git HEAD a0bbae0b2 \"SWE-bench\"): `sum([N.x, 0*N.x])` raises `TypeError: A Vector must be supplied`. Root cause (verified by running in the testbed conda env): `0*N.x` is a valid zero Vector (args=[]), but `sum()` starts from the int 0, so the first operation is `0 + N.x`, which dispatches to `Vector.__radd__` (a separate method, vector.py:452-455) with `other=0`; `__radd__` calls `_check_vector` (vector.py:723-726), which rejects any non-Vector and raises TypeError. `Vector.__add__` already has the zero guard (`if other == 0: return self`, vector.py:60), so `N.x + 0` works. Related broken op: `0 - N.x` (funnels into `__rsub__` line 340-342, which also calls `_check_vector` before the zero case). A fix in `__radd__` (and symmetrically `__rsub__`) to treat `other == 0` as a zero Vector would fix `sum()` and `0 - N.x`; `_check_vector` should remain strict because it is shared by frame.py/point.py/dyadic.py/functions.py/fieldfunctions.py. Codebase precedent: `Vector.__init__` explicitly supports `Vector(0)` and `__eq__` maps `other == 0` to `Vector(0)`. Testing: pytest is NOT installed; use the env python `/opt/miniconda3/envs/testbed/bin/python` with sympy's own runner `bin/test` (verified: test_vector.py currently passes 4/4). Tests for this module live in sympy/physics/vector/tests/test_vector.py.",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "Workspace /testbed is the SymPy source repo at git commit a0bbae0b2e7de1110db52bdc844d0e15fe1458fb (\"SWE-bench\"), 3622 commits after tag sympy-1.1.1, with version string '1.1.2.dev'; working tree is clean.",
+          "evidence": "git log -1 --format='%H %s' -> 'a0bbae0b2e7de1110db52bdc844d0e15fe1458fb SWE-bench'; git describe --tags -> 'sympy-1.1.1-3622-ga0bbae0b2'; git status -> 'nothing to commit, working tree clean'; grep __version__ sympy/release.py -> '1:__version__ = \"1.1.2.dev\"'"
+        },
+        {
+          "id": "F2",
+          "claim": "The functional Python environment is the conda env at /opt/miniconda3/envs/testbed (Python 3.9.20) with mpmath 1.3.0 and sympy installed editable from /testbed; the default python (3.11.5 at /opt/miniconda3/bin) lacks mpmath and cannot import sympy, so all test runs must use /opt/miniconda3/envs/testbed/bin/python.",
+          "evidence": "conda env list -> 'testbed  /opt/miniconda3/envs/testbed'; /opt/miniconda3/envs/testbed/bin/pip list -> 'mpmath 1.3.0', 'sympy 1.1.2.dev0 /testbed'; python -c 'import sympy' under default python -> ModuleNotFoundError: No module named 'mpmath'; site-packages of testbed env contains 'sympy.egg-link' and 'easy-install.pth'"
+        },
+        {
+          "id": "F3",
+          "claim": "pytest is NOT installed in the testbed env, but sympy's bundled test runner works and the vector test file currently passes 4/4.",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/python -c 'import pytest' -> ModuleNotFoundError; running 'cd /testbed && /opt/miniconda3/envs/testbed/bin/python bin/test sympy/physics/vector/tests/test_vector.py' -> 'sympy/physics/vector/tests/test_vector.py[4] ....  [OK]' and 'tests finished: 4 passed, in 0.34 seconds'"
+        },
+        {
+          "id": "F4",
+          "claim": "The reported bug reproduces in this environment: with N = ReferenceFrame('N'), sum([N.x, (0 * N.x)]) raises TypeError: A Vector must be supplied, with the traceback going through Vector.__radd__ at sympy/physics/vector/vector.py line 453 into _check_vector at line 725.",
+          "evidence": "Reproduced via /opt/miniconda3/envs/testbed/bin/python: 'REPRODUCED sum TypeError: A Vector must be supplied'; earlier unfiltered run showed File /testbed/sympy/physics/vector/vector.py line 453 in __radd__ ... line 725 in _check_vector raise TypeError('A Vector must be supplied')"
+        },
+        {
+          "id": "F5",
+          "claim": "Root cause: 0*N.x is a valid zero Vector (type Vector, args == [], repr '0') and Vector+Vector addition works; the failure is the int zero: `0 + N.x` dispatches to Vector.__radd__ (a separate method, not an alias) with other=0, which _check_vector rejects. Confirmed: N.x + 0 == N.x and N.x + (0*N.x) == N.x succeed, while 0 + N.x raises TypeError.",
+          "evidence": "Env python run printed: 'type(0*N.x): Vector args: []', 'N.x + 0 = N.x', 'N.x + z = N.x', '0 + N.x TypeError: A Vector must be supplied'"
+        },
+        {
+          "id": "F6",
+          "claim": "Related operations are also affected by the same root cause: `0 - N.x` raises TypeError: A Vector must be supplied because __rsub__ (vector.py:340-342) calls _check_vector on the left-side int 0 before handling the zero case; `N.x - 0` works because __sub__ (vector.py:385-387) delegates to __add__, which already has the zero guard.",
+          "evidence": "Env python run printed: '0 - N.x TypeError: A Vector must be supplied' and 'N.x - 0 = N.x'"
+        },
+        {
+          "id": "F7",
+          "claim": "The guard function _check_vector is at sympy/physics/vector/vector.py:723-726 (raises TypeError('A Vector must be supplied') for any non-Vector) and is called at vector.py lines 61 (__add__), 94 (__and__), 127 (__eq__), 196 (__or__), 322 (__ror__), 341 (__rsub__), 420 (__xor__), 453 (__radd__); it is also imported and used in dyadic.py (lines 87, 95, 275-276, 305-306, 369-370), functions.py (line 500), point.py (lines 212, 271, 301, 331), frame.py (lines 540, 735, 771), and fieldfunctions.py (lines 41, 85), so changing _check_vector affects all those modules.",
+          "evidence": "sed -n '723,726p' sympy/physics/vector/vector.py shows the function body; grep -rn \"_check_vector\" sympy/ (excluding tests) lists all call sites above"
+        },
+        {
+          "id": "F8",
+          "claim": "The codebase already has an established convention for zero: Vector.__init__ (vector.py:26-52) accepts inlist == 0 and the docstring says 'The only exception is to create a zero vector: zv = Vector(0)'; Vector.__eq__ (vector.py:112-138) maps `other == 0` to Vector(0) so `Vector(0) == 0` is True; Vector.__add__ (vector.py:58-61) already contains `if other == 0: return self` before calling _check_vector; Vector.__radd__ is a separate method at vector.py:452-455 that lacks this guard, while __rand__/__rmul__ are plain aliases set at vector.py:456-457.",
+          "evidence": "vector.py:33-34 'if inlist == 0: inlist = []'; vector.py:60 'if other == 0: return self'; vector.py:117-119 'if other == 0: other = Vector(0)'; env run printed 'Vector(0) == 0: True'; sed -n '452,457p' shows 'def __radd__(self, other):', 'other = _check_vector(other)', 'return Vector(other.args + self.args)', '__rand__ = __and__', '__rmul__ = __mul__'"
+        },
+        {
+          "id": "F9",
+          "claim": "Vector is a plain Python object (class Vector(object), vector.py:10), not a sympy Expr, so there is no sympify/Expr fallback for scalar operands; scalar handling (e.g. accepting 0) must be added explicitly in the Vector methods.",
+          "evidence": "grep -n \"class Vector\" sympy/physics/vector/vector.py -> '10:class Vector(object):'"
+        },
+        {
+          "id": "F10",
+          "claim": "The existing test file for this module is /testbed/sympy/physics/vector/tests/test_vector.py with 4 test functions (test_Vector at line 11, test_Vector_diffs at line 62, test_vector_var_in_dcm at line 129, test_vector_simplify at line 148); it already references Vector(0) (line 53: assert Vector(0).separate() == {}) and imports raises from sympy.utilities.pytest; a new regression test for adding 0 would naturally go here.",
+          "evidence": "grep -n \"def test_\" sympy/physics/vector/tests/test_vector.py lists those 4 defs; sed of line 53 shows 'assert Vector(0).separate() == {}'; line 6 'from sympy.utilities.pytest import raises'"
+        }
+      ]
+    }
+  }
+}

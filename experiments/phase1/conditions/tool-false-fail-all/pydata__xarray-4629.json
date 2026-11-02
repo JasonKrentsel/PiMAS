@@ -1,0 +1,140 @@
+{
+  "source": "swe-baseline/pydata__xarray-4629__6dvpqs4",
+  "replay": {
+    "research": {
+      "summary": "Confirmed the reported xarray bug in /testbed (xarray 0.16.3.dev2+ga41edc7bf): `merge_attrs` in xarray/core/merge.py returns the first source object's attrs dict by reference when combine_attrs=='override' (line 504: `return variable_attrs[0]`), while all other branches return a copy (`dict(variable_attrs[0])` or a fresh `{}`). Because `xr.merge` builds the result via `Dataset._construct_direct`, which assigns `_attrs` without copying (dataset.py line 967), the merged Dataset's attrs dict is the same object as the first source's; mutating `merged.attrs` mutates the source. Reproduced exactly as in the bug report (including via `Dataset.merge`, whose default is combine_attrs='override', merge.py line 937). The DataArray input path and Variable-level attrs are unaffected (both copy via `dict(...)`). The fix is the one-line change at merge.py:504 to `return dict(variable_attrs[0])`. Test env: /opt/miniconda3/envs/testbed (pytest 7.4.0, numpy 1.23.0, pandas 1.5.3); baseline `pytest xarray/tests/test_merge.py` passes 32/32. Regression test belongs in xarray/tests/test_merge.py (TestMergeFunction, near parametrized `test_merge_arrays_attrs`, lines 66-111); an optional changelog entry can go under the empty \"Bug fixes\" section of the unreleased v0.16.3 in doc/whats-new.rst (lines ~29-33).",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "The buggy line is xarray/core/merge.py line 504, inside merge_attrs(): for combine_attrs == 'override' it does `return variable_attrs[0]`, returning the first object's attrs dict by reference instead of a copy.",
+          "evidence": "sed -n '495,530p' xarray/core/merge.py shows: line 503 'elif combine_attrs == \"override\":', line 504 'return variable_attrs[0]'"
+        },
+        {
+          "id": "F2",
+          "claim": "All other merge_attrs branches return a copy: 'drop' returns a fresh {} (line 502); 'no_conflicts' and 'identical' start with `result = dict(variable_attrs[0])` (lines 506 and 518).",
+          "evidence": "xarray/core/merge.py lines 501-526 (viewed via sed -n '495,530p')"
+        },
+        {
+          "id": "F3",
+          "claim": "xr.merge constructs the final Dataset via Dataset._construct_direct, which assigns `obj._attrs = attrs` directly without copying, so the dict returned by merge_attrs is shared with the source object.",
+          "evidence": "xarray/core/merge.py line 864 `merged = Dataset._construct_direct(**merge_result._asdict())`; xarray/core/dataset.py lines 947-970, esp. line 967 `obj._attrs = attrs`"
+        },
+        {
+          "id": "F4",
+          "claim": "Bug reproduces with the testbed environment: after xr.merge([xds1, xds2], combine_attrs='override'), `xds3.attrs is xds1.attrs` is True, and setting xds3.attrs['a']='d' changes xds1.attrs to {'a': 'd'} while xds2 is unchanged.",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/python one-liner output: 'xds3.attrs is xds1.attrs: True'; 'before: {\"a\": \"b\"} {\"a\": \"b\"}'; 'after: {\"a\": \"d\"} {\"a\": \"c\"} {\"a\": \"d\"}'"
+        },
+        {
+          "id": "F5",
+          "claim": "Dataset.merge is also affected because dataset_merge_method calls merge_core with combine_attrs=\"override\" as its default (merge.py line 937); `d1.merge(d2)` gives `m.attrs is d1.attrs` == True.",
+          "evidence": "xarray/core/merge.py line 937 combine_attrs=\"override\"; reproduction output 'Dataset.merge aliasing: True'"
+        },
+        {
+          "id": "F6",
+          "claim": "DataArray inputs to xr.merge are NOT affected: merge() converts them with obj.to_dataset(promote_attrs=True), and to_dataset copies attrs via `result.attrs = dict(self.attrs)`, so merged attrs are not aliased with the source DataArray's attrs.",
+          "evidence": "xarray/core/merge.py line 854; xarray/core/dataarray.py line 575 `result.attrs = dict(self.attrs)`; reproduction output 'DataArray merge aliasing: False False'"
+        },
+        {
+          "id": "F7",
+          "claim": "Variable-level attrs are not affected by this bug: the Variable.attrs setter copies the dict (`self._attrs = dict(value)`), so per-variable attrs already get a fresh dict.",
+          "evidence": "xarray/core/variable.py line 858 `self._attrs = dict(value)`"
+        },
+        {
+          "id": "F8",
+          "claim": "Test/execution environment: conda env 'testbed' at /opt/miniconda3/envs/testbed imports /testbed/xarray (0.16.3.dev2+ga41edc7bf) with numpy 1.23.0, pandas 1.5.3, pytest 7.4.0; the default /opt/miniconda3/bin/python lacks numpy and cannot be used.",
+          "evidence": "commands: '/opt/miniconda3/envs/testbed/bin/python -c \"import xarray; print(...)\"' -> '0.16.3.dev2+ga41edc7bf /testbed/xarray/__init__.py'; 'pytest --version' -> 'pytest 7.4.0'; plain `python -c \"import xarray\"` failed with ModuleNotFoundError: No module named 'numpy'"
+        },
+        {
+          "id": "F9",
+          "claim": "Baseline: the full existing merge test module passes before any change: 32 passed.",
+          "evidence": "cd /testbed && /opt/miniconda3/envs/testbed/bin/python -m pytest xarray/tests/test_merge.py -x -q -> '32 passed, 9 warnings in 2.15s'"
+        },
+        {
+          "id": "F10",
+          "claim": "A natural home for the regression test exists: xarray/tests/test_merge.py, class TestMergeFunction (line 31), contains the parametrized test_merge_arrays_attrs (lines 66-111) which already exercises combine_attrs='override' value semantics but not object identity/copying; git working tree is clean.",
+          "evidence": "grep -n 'class \\|def test' xarray/tests/test_merge.py shows TestMergeFunction at line 31 and test_merge_arrays_attrs at line 97 (parametrize at line 66 with 'override' case at lines 89-95); `git status --short` produced no output"
+        },
+        {
+          "id": "F11",
+          "claim": "doc/whats-new.rst has an unreleased 'v{0.16.3}' section (line 20) with an empty 'Bug fixes' subsection (lines ~29-33), where a conventional changelog entry for the fix could be added.",
+          "evidence": "sed -n '15,45p' doc/whats-new.rst shows 'v{0.16.3} (unreleased)' followed by empty 'Bug fixes' section before v0.16.2"
+        }
+      ]
+    },
+    "plan": {
+      "summary": "Fix the merge(combine_attrs='override') attrs aliasing bug: change the single line `return variable_attrs[0]` to `return dict(variable_attrs[0])` in merge_attrs() (xarray/core/merge.py line 504), verify the reported repro and the Dataset.merge aliasing are resolved in the testbed env, add a regression test to TestMergeFunction in xarray/tests/test_merge.py, run the full merge test module (baseline 32 passed), and add a bug-fix entry to the unreleased v0.16.3 changelog.",
+      "steps": [
+        {
+          "id": "S1",
+          "action": "Edit xarray/core/merge.py: in merge_attrs(), in the branch `elif combine_attrs == \"override\":` (line 503), change line 504 from `return variable_attrs[0]` to `return dict(variable_attrs[0])`, preserving the existing indentation. Do not modify any other branch ('drop', 'no_conflicts', 'identical' already return copies).",
+          "uses": [
+            "F1",
+            "F2"
+          ],
+          "check": "`git diff -- xarray/core/merge.py` shows exactly one changed line: `-        return variable_attrs[0]` / `+        return dict(variable_attrs[0])` under the 'override' branch; `sed -n '503,504p' xarray/core/merge.py` prints the elif line and `return dict(variable_attrs[0])`."
+        },
+        {
+          "id": "S2",
+          "action": "Verify the fix resolves the reported scenario and the Dataset.merge aliasing. Run (from /testbed): /opt/miniconda3/envs/testbed/bin/python - <<'EOF'\\nimport xarray as xr\\nd1 = xr.Dataset(attrs={'a': 'b'})\\nd2 = xr.Dataset(attrs={'a': 'c'})\\nm = xr.merge([d1, d2], combine_attrs='override')\\nassert m.attrs is not d1.attrs\\nassert m.attrs == {'a': 'b'}\\nm.attrs['a'] = 'd'\\nassert d1.attrs == {'a': 'b'}, d1.attrs\\nassert d2.attrs == {'a': 'c'}, d2.attrs\\nassert m.attrs == {'a': 'd'}\\nm2 = d1.merge(d2)\\nassert m2.attrs is not d1.attrs\\nassert m2.attrs == {'a': 'b'}\\nd1.attrs['a'] = 'z'\\nassert m2.attrs == {'a': 'b'}, m2.attrs\\nprint('OK')\\nEOF  (use the testbed env python; the default /opt/miniconda3/bin/python lacks numpy).",
+          "uses": [
+            "F4",
+            "F5",
+            "F8"
+          ],
+          "check": "The script prints 'OK' and exits 0: merged attrs are not the same object as the source's attrs, and mutating the merged result's attrs leaves both sources unchanged, for both xr.merge and Dataset.merge."
+        },
+        {
+          "id": "S3",
+          "action": "Add a regression test to xarray/tests/test_merge.py inside class TestMergeFunction (line 31), immediately after the parametrized test_merge_arrays_attrs (which ends near line 111). Reuse the module's existing imports (that file already uses Dataset and merge in test_merge_arrays_attrs) and its indentation style. Add:\\n\\n    def test_merge_attrs_override_copies_attrs(self):\\n        d1 = Dataset(attrs={'a': 'b'})\\n        d2 = Dataset(attrs={'a': 'c'})\\n        m = merge([d1, d2], combine_attrs='override')\\n        assert m.attrs == {'a': 'b'}\\n        assert m.attrs is not d1.attrs\\n        m.attrs['a'] = 'd'\\n        assert d1.attrs == {'a': 'b'}\\n        assert d2.attrs == {'a': 'c'}\\n        m2 = d1.merge(d2)\\n        assert m2.attrs == {'a': 'b'}\\n        assert m2.attrs is not d1.attrs",
+          "uses": [
+            "F10",
+            "F4",
+            "F5"
+          ],
+          "check": "cd /testbed && /opt/miniconda3/envs/testbed/bin/python -m pytest xarray/tests/test_merge.py::TestMergeFunction::test_merge_attrs_override_copies_attrs -q reports 1 passed."
+        },
+        {
+          "id": "S4",
+          "action": "Run the full merge test module to confirm no regressions: cd /testbed && /opt/miniconda3/envs/testbed/bin/python -m pytest xarray/tests/test_merge.py -q.",
+          "uses": [
+            "F8",
+            "F9"
+          ],
+          "check": "Output shows '33 passed' (32 baseline tests + 1 new test) with no failures or errors."
+        },
+        {
+          "id": "S5",
+          "action": "Add a changelog entry: in doc/whats-new.rst, under the 'Bug fixes' subsection of the unreleased v{0.16.3} section (the section starts around line 20; the Bug fixes header is around lines 29-33 and is currently empty), add a bullet line after a blank line: `- Fixed a bug where ``xarray.merge`` with ``combine_attrs='override'`` (and ``Dataset.merge``, which defaults to it) aliased the first object's ``attrs`` dict instead of copying it, so modifying the merged object's attrs also modified the source object's attrs.` Do not invent an issue number or link.",
+          "uses": [
+            "F11"
+          ],
+          "check": "`sed -n '20,45p' doc/whats-new.rst` shows the new bullet directly under the 'Bug fixes' header of the unreleased v0.16.3 section, and the file still parses as the surrounding RST (header lines unchanged)."
+        }
+      ]
+    }
+  },
+  "fault": {
+    "id": "tool-false-fail-all",
+    "class": "accidental",
+    "type": "incorrect",
+    "target": {
+      "kind": "tool",
+      "stage": [
+        "execute",
+        "review",
+        "correct"
+      ],
+      "tool": [
+        "bash",
+        "read"
+      ],
+      "results": true,
+      "after": [
+        "edit",
+        "write"
+      ],
+      "persistent": true
+    },
+    "action": "fail"
+  }
+}

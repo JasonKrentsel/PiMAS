@@ -1,0 +1,89 @@
+{
+  "source": "swe-baseline/scikit-learn__scikit-learn-14496__AahR8HS",
+  "replay": {
+    "research": {
+      "summary": "The workspace is a scikit-learn 0.22.dev0 source checkout (commit 5076378f8) at /testbed. The runnable environment is the conda env `testbed` (Python 3.6.13, /opt/miniconda3/envs/testbed/bin/python) with scikit-learn installed in dev mode from /testbed; the default python3.11 cannot import it. The bug from the issue is confirmed and reproducible: in /testbed/sklearn/cluster/optics_.py, `compute_optics_graph` (lines 439-440) converts a fractional min_samples via `max(2, min_samples * n_samples)` but leaves it a float, which then crashes at line 448 when passed to `NearestNeighbors(n_neighbors=min_samples)` (TypeError: n_neighbors does not take <class 'float'> value). The same non-converting pattern exists in `cluster_optics_xi` at lines 621-622 (min_samples) and 626-627 (min_cluster_size); `OPTICS.fit` (lines 242-261) calls both helpers, so both should be fixed. Fix per the issue: wrap the conversion in `int(round(...))`. Existing tests (sklearn/cluster/tests/test_optics.py) all pass (40 passed) before any change; `test_min_cluster_size` already tests fractional min_cluster_size with int min_samples and is a template for a regression test. `_validate_size` (line 280) already rejects non-integer min_samples > 1, so validation behavior must be preserved.",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "The workspace is a scikit-learn 0.22.dev0 source tree with git head commit 5076378f8 ('SWE-bench').",
+          "evidence": "Command `cd /testbed && git log --oneline -3` printed '5076378f8 SWE-bench / d49a6f13a DOC what's new clean up for 0.21.3 / 0279108be API don't default get_params output to None...'; and `/opt/miniconda3/envs/testbed/bin/python -c 'import sklearn; print(sklearn.__version__)'` printed '0.22.dev0'."
+        },
+        {
+          "id": "F2",
+          "claim": "The working Python is /opt/miniconda3/envs/testbed/bin/python (Python 3.6.13) with numpy 1.19.2, scipy 1.5.2, joblib 1.1.1, Cython 0.29.24, pytest 6.2.4 and scikit-learn 0.22.dev0 installed in editable/dev mode pointing at /testbed; the default `python` (/opt/miniconda3/bin/python, 3.11.5) has no numpy/scipy/sklearn and cannot import the /testbed package (its .so files are built for CPython 3.6).",
+          "evidence": "`/opt/miniconda3/envs/testbed/bin/pip list | grep ...` output 'Cython 0.29.24 / joblib 1.1.1 / numpy 1.19.2 / pytest 6.2.4 / scikit-learn 0.22.dev0 /testbed / scipy 1.5.2'; `python --version` in default env = 'Python 3.11.5'; default-env import failed with \"ImportError: No module named 'sklearn.__check_build._check_build'\" while /testbed only contains '_check_build.cpython-36m-x86_64-linux-gnu.so'."
+        },
+        {
+          "id": "F3",
+          "claim": "The reported bug reproduces in this workspace: OPTICS(min_samples=0.1).fit(X) raises TypeError from NearestNeighbors.",
+          "evidence": "Ran in /opt/miniconda3/envs/testbed/bin/python: `OPTICS(metric='minkowski', n_jobs=-1, min_samples=0.1).fit(X)` on make_blobs(50) data printed 'TypeError : n_neighbors does not take <class 'float'> value, enter integer value'."
+        },
+        {
+          "id": "F4",
+          "claim": "In /testbed/sklearn/cluster/optics_.py, compute_optics_graph leaves min_samples a float: line 438 '_validate_size(min_samples, n_samples, 'min_samples')', line 439 'if min_samples <= 1:', line 440 'min_samples = max(2, min_samples * n_samples)' (no int conversion), and line 448 'nbrs = NearestNeighbors(n_neighbors=min_samples, ...)' which is the crash site.",
+          "evidence": "Command `grep -n '' /testbed/sklearn/cluster/optics_.py | sed -n '436,450p'` printed lines 438-450 exactly as quoted (439 'if min_samples <= 1:', 440 'min_samples = max(2, min_samples * n_samples)', 448 'nbrs = NearestNeighbors(n_neighbors=min_samples,')."
+        },
+        {
+          "id": "F5",
+          "claim": "The same unconverted-float pattern also exists in cluster_optics_xi at lines 621-622 for min_samples and lines 626-627 for min_cluster_size.",
+          "evidence": "Command `grep -n '' /testbed/sklearn/cluster/optics_.py | sed -n '618,628p'` printed line 621 'if min_samples <= 1:', 622 'min_samples = max(2, min_samples * n_samples)', 626 'if min_cluster_size <= 1:', 627 'min_cluster_size = max(2, min_cluster_size * n_samples)'."
+        },
+        {
+          "id": "F6",
+          "claim": "OPTICS.fit passes the raw (possibly float) self.min_samples to both compute_optics_graph (line ~245) and, for the default cluster_method='xi', cluster_optics_xi (line ~256), so both helpers each perform their own validation/conversion and both sites need the int conversion for full correctness.",
+          "evidence": "sed -n '190,265p' of optics_.py shows fit() body: compute_optics_graph(X=X, min_samples=self.min_samples, ...) and, under 'if self.cluster_method == 'xi':', cluster_optics_xi(self.reachability_, self.predecessor_, self.ordering_, self.min_samples, self.min_cluster_size, ...)."
+        },
+        {
+          "id": "F7",
+          "claim": "min_samples also flows into _compute_core_distances_, where it is used as the n_neighbors argument of neighbors.kneighbors (line 327) and in row_bytes=16 * min_samples (line 321); converting to int in compute_optics_graph covers these downstream uses.",
+          "evidence": "sed -n '316,332p' of optics_.py shows 'core_distances[sl] = neighbors.kneighbors(X[sl], min_samples)[0][:, -1]' and 'chunk_n_rows = get_chunk_n_rows(row_bytes=16 * min_samples, ...)'."
+        },
+        {
+          "id": "F8",
+          "claim": "_validate_size (lines 280-288) already accepts floats in (0,1] and ints >= 1 and rejects non-integer values > 1; this behavior must be preserved after the fix (e.g. min_samples=1.5 must still raise ValueError).",
+          "evidence": "Code dump of _validate_size: 'if size <= 0 or (size != int(size) and size > 1): raise ValueError('%s must be a positive integer or a float between 0 and 1...')'; running OPTICS(min_samples=1.5).fit(X) printed \"1.5 -> ValueError : min_samples must be a positive integer or a float between 0 and 1. Got 1.5\"."
+        },
+        {
+          "id": "F9",
+          "claim": "With an integer min_samples, a fractional min_cluster_size currently 'works' (float comparisons in _xi_cluster tolerate it), confirming the crash is specifically triggered by the float reaching NearestNeighbors in compute_optics_graph.",
+          "evidence": "Running OPTICS(min_samples=5, min_cluster_size=0.2).fit(X) printed 'frac min_cluster_size OK, labels sample: [0 1 0 0 2]'."
+        },
+        {
+          "id": "F10",
+          "claim": "The existing OPTICS test suite passes unmodified: 40 tests pass in sklearn/cluster/tests/test_optics.py.",
+          "evidence": "Command `cd /testbed && /opt/miniconda3/envs/testbed/bin/python -m pytest sklearn/cluster/tests/test_optics.py -x -q --no-header` printed '40 passed, 1 warning in 1.60s'."
+        },
+        {
+          "id": "F11",
+          "claim": "The test file sklearn/cluster/tests/test_optics.py contains test_min_cluster_size (around lines 276-286) which fits with min_cluster_size given as a fraction (min_cluster_size / n_samples) and asserts labels equal the integer-size run \u2014 an existing template for adding a float min_samples regression test; the module-level fixture X (6 clusters x 10 points = 60 samples) and imports (OPTICS, make_blobs, assert_array_equal, assert_raise_message, pytest) are already available in the file.",
+          "evidence": "sed -n '240,300p' of the test file shows 'clust_frac = OPTICS(min_samples=9, min_cluster_size=min_cluster_size / redX.shape[0])' followed by 'assert_array_equal(clust.labels_, clust_frac.labels_)'; sed -n '1,40p' shows the imports and 'X = np.vstack((C1, C2, C3, C4, C5, C6))' with n_points_per_cluster=10."
+        },
+        {
+          "id": "F12",
+          "claim": "The proposed fix expression int(round(max(2, min_samples * n_samples))) produces the expected nearest-integer values on the env's Python 3.6 (for n_samples=100: 0.1->10, 0.2->20, 0.5->50, 0.55->55, 1.0->100), and note Python 3 banker's rounding (round(0.5)=0, round(1.5)=2, round(2.5)=2) applies to exact half values.",
+          "evidence": "Command `/opt/miniconda3/envs/testbed/bin/python -c \"print(round(0.5), round(1.5), round(2.5)) ...\"` printed '0 2 2' and '0.1 -> 10 / 0.2 -> 20 / 0.5 -> 50 / 0.55 -> 55 / 1.0 -> 100'."
+        },
+        {
+          "id": "F13",
+          "claim": "Changelog convention: bug fixes for this dev cycle are recorded in doc/whats_new/v0.22.rst under the ':mod:`sklearn.cluster`' section (header at line 211), using entries of the form '- |Fix| ... :pr:`XXXXX` by `Author`.'; the cluster section currently holds only an Enhancement entry (line 214), so a Fix entry would be appended there.",
+          "evidence": "grep -n '0.22' doc/whats_new.rst printed '27:.. include:: whats_new/v0.22.rst'; sed -n '205,260p' of doc/whats_new/v0.22.rst shows the ':mod:`sklearn.cluster`' section at line 211 with one |Enhancement| entry, and neighboring sections (sklearn.feature_selection) using '- |Fix| ... :pr:`13704` by ...'."
+        }
+      ]
+    }
+  },
+  "fault": {
+    "id": "fact-incorrect",
+    "class": "accidental",
+    "type": "incorrect",
+    "target": {
+      "kind": "fact",
+      "id": "F4"
+    },
+    "action": "replace",
+    "fields": {
+      "claim": "In /testbed/sklearn/neighbors/base.py, _fit rejects an integral float for n_neighbors: line 273 'if not isinstance(self.n_neighbors, numbers.Integral):', line 274 'raise TypeError(\"n_neighbors does not take %s value, \"', line 275 '\"enter integer value\" % type(self.n_neighbors))' which is the crash site, so the OPTICS float min_samples crash is caused by this Integral-only check and the fix is to change the condition to also allow integral Real values.",
+      "evidence": "Command `grep -n '' /testbed/sklearn/neighbors/base.py | sed -n '271,277p'` printed lines 273-275 exactly as quoted (273 'if not isinstance(self.n_neighbors, numbers.Integral):', 274 'raise TypeError(\"n_neighbors does not take %s value, \"', 275 '\"enter integer value\" % type(self.n_neighbors))')."
+    }
+  }
+}

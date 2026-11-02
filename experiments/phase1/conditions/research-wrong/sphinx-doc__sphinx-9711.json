@@ -1,0 +1,185 @@
+{
+  "source": "swe-baseline/sphinx-doc__sphinx-9711__TSYZQ2R",
+  "replay": {
+    "research": {
+      "summary": "The reported bug is confirmed: `verify_needs_extensions` in sphinx/extension.py compares version strings lexicographically (`reqversion > extension.version`, line 54), so '0.6.0' > '0.10.0' and sphinx-gallery 0.10.0 is wrongly rejected for a 0.6.0 minimum. I reproduced the exact error end-to-end in a scratch project. The fix is to compare with `packaging.version` objects (packaging is a declared install_requires dependency and is already imported by sphinx/ext/doctest.py). Two sibling string-comparison sites exist in sphinx/application.py (needs_sphinx at line 226, require_sphinx at line 405). Edge cases for the fix: the 'unknown version' sentinel and dev-display versions like '4.3.0+/<githash>' (the actual `sphinx.__display_version__` in this checkout) raise InvalidVersion under the installed packaging 24.1, and LegacyVersion is not importable there, so parsing must be defensive. Tests run via the conda env /opt/miniconda3/envs/testbed (pytest 8.3.3, Sphinx editable from /testbed); there are no existing tests for needs_extensions, but test_config.py::test_needs_sphinx shows the established test pattern (mock __display_version__ + make_app(confoverrides=...)).",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "The bug is at sphinx/extension.py:54 in verify_needs_extensions: `if extension.version == 'unknown version' or reqversion > extension.version:` raises VersionRequirementError using a plain lexicographic (string) comparison of the two version strings.",
+          "evidence": "read /testbed/sphinx/extension.py lines 53-58: \"if extension.version == 'unknown version' or reqversion > extension.version: raise VersionRequirementError(__('This project needs the extension %s at least in version %s ...\""
+        },
+        {
+          "id": "F2",
+          "claim": "String comparison is the root cause: in Python '0.6.0' > '0.10.0' is True, while packaging.version.parse gives parse('0.10.0') > parse('0.6.0') True and parse('0.6.0') > parse('0.10.0') False.",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/python -c \"print('0.6.0' > '0.10.0')\" -> True; from packaging.version import parse; print(parse('0.10.0') > parse('0.6.0'), parse('0.6.0') > parse('0.10.0')) -> True False"
+        },
+        {
+          "id": "F3",
+          "claim": "End-to-end reproduction of the exact issue error succeeds on this checkout: a project with an extension reporting version '0.10.0' and needs_extensions = {'myext': '0.6.0'} fails with 'Sphinx version error: This project needs the extension myext at least in version 0.6.0 and therefore cannot be built with the loaded version (0.10.0).'",
+          "evidence": "scratch project under /tmp (cleaned up afterwards) built with /opt/miniconda3/envs/testbed/bin/python -m sphinx -b html doc out printed exactly that error under 'Running Sphinx v4.3.0+/ddfca61ba'"
+        },
+        {
+          "id": "F4",
+          "claim": "verify_needs_extensions runs on the 'config-inited' event with priority 800, after extensions are loaded and after the needs_sphinx check (which happens earlier in Sphinx.__init__ at sphinx/application.py:226).",
+          "evidence": "sphinx/extension.py:62 \"app.connect('config-inited', verify_needs_extensions, priority=800)\"; sphinx/application.py:226-229 performs the needs_sphinx check before the 'load all user-given extension modules' loop at lines 236-238"
+        },
+        {
+          "id": "F5",
+          "claim": "An extension's version comes from the 'version' key of the dict its setup(app) returns; if absent it defaults to the sentinel string 'unknown version' (Extension.__init__).",
+          "evidence": "sphinx/extension.py:27 \"self.version = kwargs.pop('version', 'unknown version')\"; sphinx/registry.py:458 \"app.extensions[extname] = Extension(extname, mod, **metadata)\" where metadata is setup(app)'s return"
+        },
+        {
+          "id": "F6",
+          "claim": "Two sibling string-version comparisons exist: sphinx/application.py:226 (`self.config.needs_sphinx > sphinx.__display_version__`) and sphinx/application.py:405 in require_sphinx (`if version > sphinx.__display_version__[:3]`).",
+          "evidence": "grep of sphinx/application.py: line 226 \"if self.config.needs_sphinx and self.config.needs_sphinx > sphinx.__display_version__:\"; line 405 \"if version > sphinx.__display_version__[:3]: raise VersionRequirementError(version)\""
+        },
+        {
+          "id": "F7",
+          "claim": "packaging is a declared runtime dependency and is already imported inside sphinx, so using packaging.version in the fix needs no new dependency.",
+          "evidence": "setup.py:33 \"'packaging', 'markupsafe<=2.0.1',\" inside install_requires; sphinx/ext/doctest.py:24-25 \"from packaging.specifiers import InvalidSpecifier, SpecifierSet\" / \"from packaging.version import Version\""
+        },
+        {
+          "id": "F8",
+          "claim": "In the test env (packaging 24.1) parse() raises InvalidVersion for 'unknown version', '4.3.0+', and '4.3.0+/ddfca61ba', and LegacyVersion cannot be imported from packaging.version \u2014 so a fix must keep the 'unknown version' sentinel check (or catch InvalidVersion) and cannot rely on LegacyVersion or on parsing the dev display version directly.",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/python printed: 'unknown version' -> RAISES InvalidVersion; '4.3.0+' -> RAISES InvalidVersion; parse('4.3.0+/ddfca61ba') RAISES InvalidVersion; 'LegacyVersion NOT importable: ImportError cannot import name 'LegacyVersion' from 'packaging.version'"
+        },
+        {
+          "id": "F9",
+          "claim": "In this dev checkout sphinx.__display_version__ is '4.3.0+/ddfca61ba' (git-hash suffix appended when __version__ ends with '+'), while sphinx.__version__ is '4.3.0' \u2014 relevant if the fix also parses __display_version__ for needs_sphinx/require_sphinx.",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/python -c \"import sphinx; print(repr(sphinx.__display_version__), repr(sphinx.__version__))\" -> '4.3.0+/ddfca61ba' '4.3.0'; sphinx/__init__.py:45-58 appends '/' + git hash when __version__.endswith('+')"
+        },
+        {
+          "id": "F10",
+          "claim": "The test environment is the conda env /opt/miniconda3/envs/testbed (Python 3.9.20) with pytest 8.3.3 and Sphinx 4.3.0.dev20260813 installed editable from /testbed; the base conda env has no pytest/docutils/jinja2, so tests must be run with /opt/miniconda3/envs/testbed/bin/python -m pytest.",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/pip list shows Python 3.9.20, pytest 8.3.3, docutils 0.17.1, Jinja2 2.11.3, Sphinx 4.3.0.dev20260813 /testbed; `python -m pytest --version` in base env -> 'No module named pytest'"
+        },
+        {
+          "id": "F11",
+          "claim": "There are no existing tests for needs_extensions/verify_needs_extensions; the analogous needs_sphinx test mocks sphinx.__display_version__ to '1.3.4' and uses the make_app fixture with confoverrides, and the full tests/test_config.py suite (34 tests) currently passes.",
+          "evidence": "grep of tests/ for needs_extensions|verify_needs_extensions -> no matches; tests/test_config.py:175-194 test_needs_sphinx uses @mock.patch.object(sphinx, '__display_version__', '1.3.4') and make_app(confoverrides={'needs_sphinx': ...}); /opt/miniconda3/envs/testbed/bin/python -m pytest tests/test_config.py -> '34 passed'"
+        },
+        {
+          "id": "F12",
+          "claim": "Test fixtures app/make_app/tempdir are provided via pytest_plugins = 'sphinx.testing.fixtures' in tests/conftest.py; the config value needs_extensions has default {} and no type validation (so values are strings by convention only).",
+          "evidence": "tests/conftest.py:17 \"pytest_plugins = 'sphinx.testing.fixtures'\"; sphinx/config.py:130 \"'needs_extensions': ({}, None, []),\""
+        },
+        {
+          "id": "F13",
+          "claim": "There is no existing version-parsing helper: sphinx/versioning.py exists but implements unrelated doctree versioning (versionchanged/added, imported by sphinx/io.py); no sphinx/util/versioning.py and no parse_version function exist anywhere in sphinx/ or tests/.",
+          "evidence": "grep -rn 'def parse_version|get_matching_versions|versioning' sphinx/ shows only sphinx/versioning.py (doctree UIDs, line 151 'Add UIDs to doctree for versioning'), sphinx/io.py:33 import, and sphinx/application.py:103 builtins entry; grep -rn 'parse_version' tests/ sphinx/ -> no matches"
+        },
+        {
+          "id": "F14",
+          "claim": "Repo state: master branch at commit ddfca61ba ('SWE-bench'), git describe v4.2.0-140-gddfca61ba; CHANGES says 'Release 4.3.0 (in development)'; __version__ = '4.3.0+'.",
+          "evidence": "git log --oneline -1 -> 'ddfca61ba SWE-bench'; git describe --tags -> 'v4.2.0-140-gddfca61ba'; head of CHANGES -> 'Release 4.3.0 (in development)'; sphinx/__init__.py:33 \"__version__ = '4.3.0+'\""
+        },
+        {
+          "id": "F15",
+          "claim": "Documentation to keep consistent: doc/usage/configuration.rst:374-386 describes needs_extensions ('version strings should be in the form major.minor'), and doc/extdev/index.rst (~line 161) documents the extension 'version' metadata key used by needs_extensions.",
+          "evidence": "read /testbed/doc/usage/configuration.rst lines 374-386 '.. confval:: needs_extensions ... The version strings should be in the form ``major.minor``'; doc/extdev/index.rst lines 161-163 \"'version': a string that identifies the extension version. It is used for extension version requirement checking (see :confval:`needs_extensions`)\""
+        },
+        {
+          "id": "F16",
+          "claim": "Lint constraints for new code: flake8 max-line-length is 95 with tests/* ignoring E501 (setup.cfg), and mypy is run over sphinx/ (tox.ini [testenv:mypy]), so added code in sphinx/ should be type-annotated.",
+          "evidence": "setup.cfg [flake8] \"max-line-length = 95\" and \"per-file-ignores: tests/*: E501\"; tox.ini \"[testenv:mypy] ... commands= mypy sphinx/\""
+        }
+      ]
+    }
+  },
+  "fault": {
+    "id": "research-wrong",
+    "class": "accidental",
+    "type": "incorrect",
+    "target": {
+      "kind": "stage",
+      "stage": "research"
+    },
+    "action": "replace",
+    "findings": {
+      "summary": "The reported bug is confirmed: `verify_needs_extensions` in sphinx/extension.py fails because `load_extension` in sphinx/registry.py passes the extension's `version` metadata to Extension and leaves the matching `needs_extensions` requirement as raw strings, so the later comparison (`reqversion > extension.version`, line 54) is lexicographic; '0.6.0' > '0.10.0' and sphinx-gallery 0.10.0 is rejected for a 0.6.0 minimum. I reproduced the exact error end-to-end in a scratch project. The fix is to normalize both values with `packaging.version` in `load_extension` (packaging is a declared install_requires dependency and is already imported by sphinx/ext/doctest.py), preserving the 'unknown version' sentinel. The needs_sphinx/require_sphinx string comparisons in sphinx/application.py are separate Sphinx-version checks and do not consume extension.version. Edge cases for the fix: the 'unknown version' sentinel and dev-display versions like '4.3.0+/<githash>' (the actual `sphinx.__display_version__` in this checkout) raise InvalidVersion under the installed packaging 24.1, and LegacyVersion is not importable there, so normalization must be defensive. Tests run via the conda env /opt/miniconda3/envs/testbed (pytest 8.3.3, Sphinx editable from /testbed); there are no existing tests for needs_extensions, but test_config.py::test_needs_sphinx shows the established test pattern (mock __display_version__ + make_app(confoverrides=...)).",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "The reported failure is raised by verify_needs_extensions at sphinx/extension.py:54, but the defect is upstream in sphinx/registry.py:458 in load_extension: it passes the raw 'version' metadata to Extension and leaves the raw needs_extensions requirement, so `if extension.version == 'unknown version' or reqversion > extension.version:` performs a plain lexicographic (string) comparison of the two version strings.",
+          "evidence": "read /testbed/sphinx/registry.py lines 455-460: 'metadata = mod.setup(app) or {}; app.extensions[extname] = Extension(extname, mod, **metadata)'; read /testbed/sphinx/extension.py lines 53-58: 'if extension.version == 'unknown version' or reqversion > extension.version: raise VersionRequirementError(__('This project needs the extension %s at least in version %s ...')'"
+        },
+        {
+          "id": "F2",
+          "claim": "The missing normalization in load_extension is the root cause: in Python '0.6.0' > '0.10.0' is True, while packaging.version.parse gives parse('0.10.0') > parse('0.6.0') True and parse('0.6.0') > parse('0.10.0') False.",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/python -c \"print('0.6.0' > '0.10.0')\" -> True; from packaging.version import parse; print(parse('0.10.0') > parse('0.6.0'), parse('0.6.0') > parse('0.10.0')) -> True False"
+        },
+        {
+          "id": "F3",
+          "claim": "End-to-end reproduction of the exact issue error succeeds on this checkout: a project with an extension reporting version '0.10.0' and needs_extensions = {'myext': '0.6.0'} fails with 'Sphinx version error: This project needs the extension myext at least in version 0.6.0 and therefore cannot be built with the loaded version (0.10.0).'",
+          "evidence": "scratch project under /tmp (cleaned up afterwards) built with /opt/miniconda3/envs/testbed/bin/python -m sphinx -b html doc out printed exactly that error under 'Running Sphinx v4.3.0+/ddfca61ba'"
+        },
+        {
+          "id": "F4",
+          "claim": "verify_needs_extensions runs on the 'config-inited' event with priority 800, after load_extension has populated app.extensions with the raw version values and after the needs_sphinx check (which happens earlier in Sphinx.__init__ at sphinx/application.py:226).",
+          "evidence": "sphinx/extension.py:62 \"app.connect('config-inited', verify_needs_extensions, priority=800)\"; sphinx/application.py:226-229 performs the needs_sphinx check before the 'load all user-given extension modules' loop at lines 236-238"
+        },
+        {
+          "id": "F5",
+          "claim": "An extension's version comes from the 'version' key of the dict its setup(app) returns; if absent it defaults to the sentinel string 'unknown version' (Extension.__init__), and load_extension currently passes that value through unchanged.",
+          "evidence": "sphinx/extension.py:27 \"self.version = kwargs.pop('version', 'unknown version')\"; sphinx/registry.py:458 \"app.extensions[extname] = Extension(extname, mod, **metadata)\" where metadata is setup(app)'s return"
+        },
+        {
+          "id": "F6",
+          "claim": "The needs_sphinx and require_sphinx string-version comparisons in sphinx/application.py are separate Sphinx-version checks: line 226 (`self.config.needs_sphinx > sphinx.__display_version__`) and line 405 in require_sphinx (`if version > sphinx.__display_version__[:3]`); they do not consume the extension.version value that load_extension stores.",
+          "evidence": "grep of sphinx/application.py: line 226 \"if self.config.needs_sphinx and self.config.needs_sphinx > sphinx.__display_version__:\"; line 405 \"if version > sphinx.__display_version__[:3]: raise VersionRequirementError(version)\""
+        },
+        {
+          "id": "F7",
+          "claim": "packaging is a declared runtime dependency and is already imported inside sphinx, so using packaging.version in the fix needs no new dependency.",
+          "evidence": "setup.py:33 \"'packaging', 'markupsafe<=2.0.1',\" inside install_requires; sphinx/ext/doctest.py:24-25 \"from packaging.specifiers import InvalidSpecifier, SpecifierSet\" / \"from packaging.version import Version\""
+        },
+        {
+          "id": "F8",
+          "claim": "In the test env (packaging 24.1) parse() raises InvalidVersion for 'unknown version', '4.3.0+', and '4.3.0+/ddfca61ba', and LegacyVersion cannot be imported from packaging.version \u2014 so normalization in load_extension must keep the 'unknown version' sentinel check (or catch InvalidVersion) and cannot rely on LegacyVersion or on parsing the dev display version directly.",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/python printed: 'unknown version' -> RAISES InvalidVersion; '4.3.0+' -> RAISES InvalidVersion; parse('4.3.0+/ddfca61ba') RAISES InvalidVersion; 'LegacyVersion NOT importable: ImportError cannot import name 'LegacyVersion' from 'packaging.version'"
+        },
+        {
+          "id": "F9",
+          "claim": "In this dev checkout sphinx.__display_version__ is '4.3.0+/ddfca61ba' (git-hash suffix appended when __version__ ends with '+'), while sphinx.__version__ is '4.3.0' \u2014 noted because the application.py Sphinx-version checks use __display_version__, but the extension fix in load_extension only needs to handle extension version strings and needs_extensions values.",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/python -c \"import sphinx; print(repr(sphinx.__display_version__), repr(sphinx.__version__))\" -> '4.3.0+/ddfca61ba' '4.3.0'; sphinx/__init__.py:45-58 appends '/' + git hash when __version__.endswith('+')"
+        },
+        {
+          "id": "F10",
+          "claim": "The test environment is the conda env /opt/miniconda3/envs/testbed (Python 3.9.20) with pytest 8.3.3 and Sphinx 4.3.0.dev20260813 installed editable from /testbed; the base conda env has no pytest/docutils/jinja2, so tests must be run with /opt/miniconda3/envs/testbed/bin/python -m pytest.",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/pip list shows Python 3.9.20, pytest 8.3.3, docutils 0.17.1, Jinja2 2.11.3, Sphinx 4.3.0.dev20260813 /testbed; `python -m pytest --version` in base env -> 'No module named pytest'"
+        },
+        {
+          "id": "F11",
+          "claim": "There are no existing tests for needs_extensions/verify_needs_extensions; the analogous needs_sphinx test mocks sphinx.__display_version__ to '1.3.4' and uses the make_app fixture with confoverrides, and the full tests/test_config.py suite (34 tests) currently passes.",
+          "evidence": "grep of tests/ for needs_extensions|verify_needs_extensions -> no matches; tests/test_config.py:175-194 test_needs_sphinx uses @mock.patch.object(sphinx, '__display_version__', '1.3.4') and make_app(confoverrides={'needs_sphinx': ...}); /opt/miniconda3/envs/testbed/bin/python -m pytest tests/test_config.py -> '34 passed'"
+        },
+        {
+          "id": "F12",
+          "claim": "Test fixtures app/make_app/tempdir are provided via pytest_plugins = 'sphinx.testing.fixtures' in tests/conftest.py; the config value needs_extensions has default {} and no type validation (so values are strings by convention only).",
+          "evidence": "tests/conftest.py:17 \"pytest_plugins = 'sphinx.testing.fixtures'\"; sphinx/config.py:130 \"'needs_extensions': ({}, None, []),\""
+        },
+        {
+          "id": "F13",
+          "claim": "There is no existing version-parsing helper: sphinx/versioning.py exists but implements unrelated doctree versioning (versionchanged/added, imported by sphinx/io.py); no sphinx/util/versioning.py and no parse_version function exist anywhere in sphinx/ or tests/.",
+          "evidence": "grep -rn 'def parse_version|get_matching_versions|versioning' sphinx/ shows only sphinx/versioning.py (doctree UIDs, line 151 'Add UIDs to doctree for versioning'), sphinx/io.py:33 import, and sphinx/application.py:103 builtins entry; grep -rn 'parse_version' tests/ sphinx/ -> no matches"
+        },
+        {
+          "id": "F14",
+          "claim": "Repo state: master branch at commit ddfca61ba ('SWE-bench'), git describe v4.2.0-140-gddfca61ba; CHANGES says 'Release 4.3.0 (in development)'; __version__ = '4.3.0+'.",
+          "evidence": "git log --oneline -1 -> 'ddfca61ba SWE-bench'; git describe --tags -> 'v4.2.0-140-gddfca61ba'; head of CHANGES -> 'Release 4.3.0 (in development)'; sphinx/__init__.py:33 \"__version__ = '4.3.0+'\""
+        },
+        {
+          "id": "F15",
+          "claim": "Documentation to keep consistent: doc/usage/configuration.rst:374-386 describes needs_extensions ('version strings should be in the form major.minor'), and doc/extdev/index.rst (~line 161) documents the extension 'version' metadata key used by needs_extensions.",
+          "evidence": "read /testbed/doc/usage/configuration.rst lines 374-386 '.. confval:: needs_extensions ... The version strings should be in the form ``major.minor``'; doc/extdev/index.rst lines 161-163 \"'version': a string that identifies the extension version. It is used for extension version requirement checking (see :confval:`needs_extensions`)\""
+        },
+        {
+          "id": "F16",
+          "claim": "Lint constraints for new code: flake8 max-line-length is 95 with tests/* ignoring E501 (setup.cfg), and mypy is run over sphinx/ (tox.ini [testenv:mypy]), so added code in sphinx/ should be type-annotated.",
+          "evidence": "setup.cfg [flake8] \"max-line-length = 95\" and \"per-file-ignores: tests/*: E501\"; tox.ini \"[testenv:mypy] ... commands= mypy sphinx/\""
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,140 @@
+{
+  "source": "swe-baseline/scikit-learn__scikit-learn-13142__FvuZ9JV",
+  "replay": {
+    "research": {
+      "summary": "Workspace is the scikit-learn 0.21.dev0 source tree at /testbed (commit 87330378b, \"SWE-bench\"); use /opt/miniconda3/envs/testbed/bin/python (Py 3.6.13) where sklearn is installed in dev mode from /testbed (default python 3.11 cannot import it). Root cause of the reported bug is in BaseMixture.fit_predict (/testbed/sklearn/mixture/base.py): after the n_init loop, the \"final E-step\" (line 263) is computed on the last initialization run's parameters still held on `self`, BEFORE `self._set_parameters(best_params)` (line 272); the returned `log_resp.argmax(axis=1)` (line 276) therefore uses last-run params instead of the best (max lower_bound) params saved at lines 255-258. With n_init=1 the last run IS the best run so the inconsistency is invisible; with n_init>1 it manifests (reproduced: 81.5% label mismatch for GaussianMixture n_init=5, 61.3% for BayesianGaussianMixture n_init=3). Both GaussianMixture and BayesianGaussianMixture inherit fit/fit_predict from BaseMixture without override. The existing tests test_gaussian_mixture_fit_predict (test_gaussian_mixture.py:580) and test_bayesian_mixture_fit_predict (test_bayesian_mixture.py:436) do not set n_init>1, so all 54 mixture tests currently pass and the bug is uncaught. Fix direction: move the final E-step to after _set_parameters(best_params)/n_iter_/lower_bound_ assignments so returned labels are computed from the best parameters; this keeps warm-start behavior identical and is verified by re-running the mixture test files (~5s).",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "The workspace is a scikit-learn source tree at /testbed, git commit 87330378b (subject 'SWE-bench'), version 0.21.dev0 (git describe: 0.19-branching-1601-g87330378b); working tree is clean.",
+          "evidence": "cd /testbed && git log --oneline -1 -> '87330378b SWE-bench'; git describe --tags -> '0.19-branching-1601-g87330378b'; git status --short -> empty; pip (testbed env) shows 'scikit-learn 0.21.dev0 /testbed'"
+        },
+        {
+          "id": "F2",
+          "claim": "The default python (/opt/miniconda3/bin/python, Python 3.11.5) cannot import sklearn from /testbed (compiled extensions only built for cpython-36m); the working interpreter is /opt/miniconda3/envs/testbed/bin/python (Python 3.6.13) with scikit-learn 0.21.dev0 installed in development mode from /testbed, plus numpy 1.19.2, scipy 1.5.2, pytest 6.2.4, Cython 0.29.24.",
+          "evidence": "python -c \"import sklearn\" with default python -> ImportError 'No module named sklearn.__check_build._check_build'; /opt/miniconda3/envs/testbed/bin/python -c \"import sklearn...\" -> 'sklearn 0.21.dev0 /testbed/sklearn/__init__.py', 'numpy 1.19.2', 'scipy 1.5.2'; that env's pip list -> 'scikit-learn 0.21.dev0 /testbed', 'pytest 6.2.4'"
+        },
+        {
+          "id": "F3",
+          "claim": "GaussianMixture and BayesianGaussianMixture do not override fit or fit_predict; both inherit them from BaseMixture (fit at base.py:169 which simply calls self.fit_predict(X, y) at base.py:191; fit_predict at base.py:194).",
+          "evidence": "grep -n 'def fit_predict|def fit(' sklearn/mixture/bayesian_mixture.py sklearn/mixture/gaussian_mixture.py -> no matches (exit 1); /testbed/sklearn/mixture/base.py lines 169 ('def fit') and 194 ('def fit_predict'), line 191 'self.fit_predict(X, y)'"
+        },
+        {
+          "id": "F4",
+          "claim": "Root cause in BaseMixture.fit_predict: the final E-step at /testbed/sklearn/mixture/base.py:263 ('_, log_resp = self._e_step(X)', comment at lines 260-262 'Always do a final e-step to guarantee that the labels returned by fit_predict(X) are always consistent with fit(X).predict(X)') is executed on the last initialization run's parameters still on self, BEFORE self._set_parameters(best_params) at line 272; the returned labels at line 276 ('return log_resp.argmax(axis=1)') are thus computed from the last run's params, not the best (max lower_bound) params captured at lines 255-258.",
+          "evidence": "awk print of /testbed/sklearn/mixture/base.py lines 230-276 shows: loop over inits 230-258 ('best_params = self._get_parameters()' at 257), then line 263 '_, log_resp = self._e_step(X)', ConvergenceWarning 265-270, then 272 'self._set_parameters(best_params)', 273 'self.n_iter_ = best_n_iter', 274 'self.lower_bound_ = max_lower_bound', 276 'return log_resp.argmax(axis=1)'"
+        },
+        {
+          "id": "F5",
+          "claim": "Bug reproduced: with X=RandomState(0).randn(1000,5) and GaussianMixture(n_components=5, random_state=0), n_init=1 gives fit_predict(X) == predict(X) (mismatch fraction 0.0), but n_init=5 gives 81.5% of labels mismatched.",
+          "evidence": "ran repro script with /opt/miniconda3/envs/testbed/bin/python: output 'n_init=1 equal: True mismatch frac: 0.0' and 'n_init=5 equal: False mismatch frac: 0.815'"
+        },
+        {
+          "id": "F6",
+          "claim": "BayesianGaussianMixture is affected identically (same inherited fit_predict): with X=RandomState(0).randn(300,5) and BayesianGaussianMixture(n_components=3, random_state=0), n_init=1 labels agree but n_init=3 gives 61.3% mismatch between fit_predict and predict.",
+          "evidence": "ran repro script: output 'BGM n_init=1 equal: True mismatch frac: 0.0' and 'BGM n_init=3 equal: False mismatch frac: 0.6133333333333333'"
+        },
+        {
+          "id": "F7",
+          "claim": "The existing unit test test_gaussian_mixture_fit_predict (sklearn/mixture/tests/test_gaussian_mixture.py, defined at line 580) parametrizes only (seed, max_iter, tol) with 4 tuples and never sets n_init (default 1), comparing f.fit(X).predict(X) vs g.fit_predict(X) on a deepcopy; it currently passes 4/4, so it does not catch the bug.",
+          "evidence": "read of test_gaussian_mixture.py lines 578-600 shows parametrize 'seed, max_iter, tol' and no n_init arg in GaussianMixture(...); pytest sklearn/mixture/tests/test_gaussian_mixture.py::test_gaussian_mixture_fit_predict -> '4 passed in 0.86s'"
+        },
+        {
+          "id": "F8",
+          "claim": "The analogous test test_bayesian_mixture_fit_predict (sklearn/mixture/tests/test_bayesian_mixture.py:436) has the same pattern with no n_init, and the full mixture suite currently passes: 54 passed in ~4.7s, giving a fast regression baseline for verifying the fix.",
+          "evidence": "read of test_bayesian_mixture.py lines 430-453 (parametrize 'seed, max_iter, tol', BayesianGaussianMixture(...) without n_init); pytest sklearn/mixture/tests/test_gaussian_mixture.py sklearn/mixture/tests/test_bayesian_mixture.py -q -> '54 passed, 8 warnings in 4.66s'"
+        },
+        {
+          "id": "F9",
+          "claim": "There are no other fit_predict implementations/callers in the mixture module (only the definition in base.py and the call from fit at base.py:191), and test_mixture.py contains no fit_predict or warm_start tests, so regression risk for the fix is confined to the 54 mixture tests above; note do_init logic at base.py:221-222 (warm_start collapses n_init to 1 on subsequent fits) means an unconditional final E-step placed after _set_parameters(best_params) preserves current warm-start behavior since then best params == last run's params.",
+          "evidence": "grep -rn 'fit_predict' sklearn/mixture/*.py (excluding def) -> only base.py:191 and base.py:261 (comment); grep -n 'fit_predict|warm_start' sklearn/mixture/tests/test_mixture.py -> no output; base.py lines 221-222: 'do_init = not(self.warm_start and hasattr(self, \"converged_\"))', 'n_init = self.n_init if do_init else 1'"
+        },
+        {
+          "id": "F10",
+          "claim": "Fix direction implied by the code: move the final E-step (currently base.py:260-263) to after 'self._set_parameters(best_params)'/'self.n_iter_ = best_n_iter'/'self.lower_bound_ = max_lower_bound' (base.py:272-274) so the returned argmax labels are computed from the best parameters, matching predict(X); the ConvergenceWarning block (lines 265-270) can remain where it is or move with the E-step.",
+          "evidence": "code reading of /testbed/sklearn/mixture/base.py lines 255-276 (best_params captured at 255-258, E-step at 263 on pre-set parameters, set_parameters at 272, return at 276) together with the repro results (n_init=1 consistent, n_init>1 inconsistent) showing the stale-parameters mechanism"
+        }
+      ]
+    },
+    "plan": {
+      "summary": "Fix fit_predict/predict inconsistency in sklearn mixture models when n_init>1. Root cause (F4): in BaseMixture.fit_predict (/testbed/sklearn/mixture/base.py), the final E-step at line 263 runs on the last init run's parameters before self._set_parameters(best_params) at line 272, so returned labels use stale (last-run) params instead of the best (max lower_bound) params. Fix: move the final E-step to after the best-parameter restore so labels come from the best parameters. Verified via a repro script (GaussianMixture n_init=5, BayesianGaussianMixture n_init=3) and the 54-test mixture suite; test files are left untouched and used only as the regression baseline.",
+      "steps": [
+        {
+          "id": "S1",
+          "action": "Verify the working interpreter: run /opt/miniconda3/envs/testbed/bin/python -c \"import sklearn, numpy, scipy; print(sklearn.__version__, sklearn.__file__, numpy.__version__, scipy.__version__)\". Expect '0.21.dev0 /testbed/sklearn/__init__.py'. Use this interpreter for every subsequent command; do NOT use the default python (it cannot import the /testbed build).",
+          "uses": [
+            "F1",
+            "F2"
+          ],
+          "check": "Command prints '0.21.dev0 /testbed/sklearn/__init__.py' with no ImportError; note the exact python path for later steps."
+        },
+        {
+          "id": "S2",
+          "action": "Establish the pre-fix bug baseline. Write /tmp/repro_fit_predict.py containing: import numpy as np; from sklearn.mixture import GaussianMixture, BayesianGaussianMixture; from sklearn.utils.testing import assert_array_equal. X = np.random.RandomState(0).randn(1000, 5); gm = GaussianMixture(n_components=5, n_init=5, random_state=0); c1 = gm.fit_predict(X); c2 = gm.predict(X); print('GM n_init=5 equal:', bool((c1 == c2).all()), 'mismatch frac:', float((c1 != c2).mean())); assert_array_equal(c1, c2) \u2014 but run the print BEFORE the assert so the mismatch fraction is visible (e.g., wrap the assert in try/except AssertionError as e: print('GM raised:', e)). Then a second block: Xb = np.random.RandomState(0).randn(300, 5); bgm = BayesianGaussianMixture(n_components=3, n_init=3, random_state=0); c1b = bgm.fit_predict(Xb); c2b = bgm.predict(Xb); print('BGM n_init=3 equal:', bool((c1b == c2b).all()), 'mismatch frac:', float((c1b != c2b).mean())). Run: /opt/miniconda3/envs/testbed/bin/python /tmp/repro_fit_predict.py",
+          "uses": [
+            "F2",
+            "F5",
+            "F6"
+          ],
+          "check": "Before the fix the script prints GM n_init=5 equal: False with mismatch frac around 0.81 and BGM n_init=3 equal: False with mismatch frac around 0.61 (assert raises for GM). Save the printed fractions for comparison after the fix."
+        },
+        {
+          "id": "S3",
+          "action": "Establish the pre-fix test baseline: cd /testbed && /opt/miniconda3/envs/testbed/bin/python -m pytest sklearn/mixture/tests/test_gaussian_mixture.py sklearn/mixture/tests/test_bayesian_mixture.py -q. Do not modify any files in sklearn/mixture/tests/ \u2014 they serve as the regression baseline.",
+          "uses": [
+            "F8"
+          ],
+          "check": "Output ends with '54 passed' (plus warnings) in under ~10s, with zero failures."
+        },
+        {
+          "id": "S4",
+          "action": "Apply the fix in /testbed/sklearn/mixture/base.py, function BaseMixture.fit_predict. Current structure (lines ~255-276): after the n_init loop ends with best_params captured at lines 255-258, there is (a) the 3-line comment 'Always do a final e-step to guarantee that the labels returned by fit_predict(X) are always consistent with fit(X).predict(X) and it also provides the lower bound of the data' (lines 260-262), (b) '_, log_resp = self._e_step(X)' (line 263), (c) the ConvergenceWarning block 'if not self.converged_: warnings.warn(\"Initialization %d did not converge...\", ConvergenceWarning)' (lines 265-270), (d) '# Restore the best parameters and their attributes' + 'self._set_parameters(best_params)' (line 272), 'self.n_iter_ = best_n_iter' (273), 'self.lower_bound_ = max_lower_bound' (274), and 'return log_resp.argmax(axis=1)' (276). Edit: delete items (a) and (b) from their current position, leaving the ConvergenceWarning block (c) where it is; then insert (a) and (b) \u2014 the same comment and the same '_, log_resp = self._e_step(X)' line \u2014 after line 274 ('self.lower_bound_ = max_lower_bound') and before the blank line preceding 'return log_resp.argmax(axis=1)'. Net effect: the final E-step runs on the restored best parameters. Do not change anything else in the file, do not touch fit(), _e_step, _set_parameters, or any other file.",
+          "uses": [
+            "F3",
+            "F4",
+            "F10"
+          ],
+          "check": "cd /testbed && git diff shows exactly one hunk in sklearn/mixture/base.py: the comment + '_, log_resp = self._e_step(X)' removed from before the ConvergenceWarning block and re-added after 'self.lower_bound_ = max_lower_bound', i.e. '_, log_resp = self._e_step(X)' now appears textually after 'self._set_parameters(best_params)'. Also verify the function still ends with 'return log_resp.argmax(axis=1)' and /opt/miniconda3/envs/testbed/bin/python -c \"from sklearn.mixture import GaussianMixture\" imports without syntax errors."
+        },
+        {
+          "id": "S5",
+          "action": "Verify the fix with the repro script: re-run /opt/miniconda3/envs/testbed/bin/python /tmp/repro_fit_predict.py. Additionally verify the exact acceptance criteria from the issue (both with and without n_init, using assert_array_equal and no exceptions): write /tmp/repro_issue.py with X = np.random.randn(1000, 5); for cls_kwargs in [dict(n_components=5), dict(n_components=5, n_init=5)]: gm = GaussianMixture(**cls_kwargs); assert_array_equal(gm.fit_predict(X), gm.predict(X)); print('ok', cls_kwargs) and run it with the same interpreter.",
+          "uses": [
+            "F2",
+            "F5",
+            "F6"
+          ],
+          "check": "The repro script now prints 'GM n_init=5 equal: True mismatch frac: 0.0' and 'BGM n_init=3 equal: True mismatch frac: 0.0' (no AssertionError). The issue script prints 'ok {n_components: 5}' and 'ok {n_components: 5, n_init: 5}' with no exceptions."
+        },
+        {
+          "id": "S6",
+          "action": "Run the regression suite to confirm no behavior regressions (warm-start, convergence, parameters): cd /testbed && /opt/miniconda3/envs/testbed/bin/python -m pytest sklearn/mixture/tests/test_gaussian_mixture.py sklearn/mixture/tests/test_bayesian_mixture.py -q. Optionally also run /opt/miniconda3/envs/testbed/bin/python -m pytest sklearn/mixture/tests/ -q to cover test_mixture.py. Confirm git status shows only sklearn/mixture/base.py modified (test files untouched).",
+          "uses": [
+            "F8",
+            "F9"
+          ],
+          "check": "Output ends with '54 passed' (plus warnings) in under ~10s and zero failures; git status --short lists only ' M sklearn/mixture/base.py'."
+        }
+      ]
+    }
+  },
+  "fault": {
+    "id": "tool-false-fail",
+    "class": "accidental",
+    "type": "incorrect",
+    "target": {
+      "kind": "tool",
+      "stage": "execute",
+      "tool": [
+        "bash",
+        "read"
+      ],
+      "results": true,
+      "after": [
+        "edit",
+        "write"
+      ]
+    },
+    "action": "fail"
+  }
+}

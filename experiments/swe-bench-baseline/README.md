@@ -82,9 +82,9 @@ SWE-bench tasks allow internet access, and these runs left it on. **14 of 60 bas
 patch as a research fact. GitHub lookups happened in every stage: research in 4 runs, plan in 3, execute in 6. The
 pilot had 7 runs with network calls, 3 of them to GitHub. Per-run counts are in `results/*-network.csv`.
 
-Fault runs should keep the same network setting so they compare to this baseline. Count a fault the agent corrects by
-looking up upstream as "detected through outside lookup", not as recovery. For malicious-instruction faults, point any
-endpoint the instruction names at a fake address.
+Phase 1 therefore runs offline (`PIMAS_OFFLINE=1`): an agent that can fetch the fix is not recovering from a fault.
+Its offline controls, not these runs, are the clean comparison; see
+[`../phase1/README.md`](../phase1/README.md#how-a-run-is-controlled). The numbers above were measured online.
 
 ## Setup
 

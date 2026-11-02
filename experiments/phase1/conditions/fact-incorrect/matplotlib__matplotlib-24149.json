@@ -1,0 +1,69 @@
+{
+  "source": "swe-baseline/matplotlib__matplotlib-24149__CTqFNUC",
+  "replay": {
+    "research": {
+      "summary": "The workspace is the matplotlib source repo at SWE-bench base commit ea7c82e7aa (v3.7.0.dev343, branch main, clean tree). The bug reproduces in the conda env /opt/miniconda3/envs/testbed (Python 3.11.11, numpy 1.25.2, pytest 8.3.4; matplotlib importable in-place from /testbed/lib with built C extensions; note the default /opt/miniconda3/bin/python lacks numpy/matplotlib). Root cause: commit cfb27b3481 (PR #23751, 'FIX: show bars when the first location is nan') renamed cbook._safe_first_non_none to _safe_first_finite and made it skip non-finite values; it now raises StopIteration when every element is non-finite (cbook/__init__.py:1749), but Axes._convert_dx (axes/_axes.py:2183, 2188) only catches (TypeError, IndexError, KeyError), so ax.bar([np.nan],[np.nan]) and ax.barh crash via Axes.bar (axes/_axes.py:2373). In-memory simulation confirms the minimal fix \u2014 adding StopIteration to both except tuples in _convert_dx \u2014 makes bar/barh return a BarCollection with a NaN-located Rectangle (no exception) while leaving the leading-NaN behavior (covered by existing test_bar_leading_nan, test_axes.py:8176, which passes) unchanged. Other _safe_first_finite callers already guard StopIteration (dates.py:1864, units.py:201); a second latent occurrence exists at axes/_axes.py:4362 (scatter with all-NaN c also raises StopIteration) but is outside the reported bar/barh bug. Baseline: 208 bar/stem/errorbar/scatter tests in test_axes.py and test_units.py pass; test_cbook.py has pre-existing pytest-8 failures unrelated to this bug (legacy setup() methods).",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "Workspace is the matplotlib repo at commit ea7c82e7aa ('SWE-bench') on branch main with a clean working tree; the in-place module reports version 3.7.0.dev343+gea7c82e7aa.",
+          "evidence": "git log -1 --format='%H %s' -> 'ea7c82e7aaa6fd9642958210d2b8b9c03aab9bd2 SWE-bench'; git status -> 'nothing to commit, working tree clean'; python -c 'import matplotlib; print(matplotlib.__version__)' from /opt/miniconda3/envs/testbed/bin/python -> '3.7.0.dev343+gea7c82e7aa'"
+        },
+        {
+          "id": "F2",
+          "claim": "The runnable test environment is conda env /opt/miniconda3/envs/testbed (Python 3.11.11, numpy 1.25.2, pytest 8.3.4, Pillow 10.0.0) with matplotlib importable from /testbed/lib/matplotlib (in-place, C extensions .so files already built); the default /opt/miniconda3/bin/python (3.11.5) has neither numpy nor matplotlib, so test/env commands must use /opt/miniconda3/envs/testbed/bin/python.",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/python -c 'import numpy, matplotlib; ...' -> 'numpy 1.25.2', 'mpl 3.7.0.dev343+gea7c82e7aa /testbed/lib/matplotlib/__init__.py'; pip list in that env shows pytest 8.3.4; /opt/miniconda3/bin/python -c 'import numpy' -> ModuleNotFoundError; .so files like lib/matplotlib/_image.cpython-311-x86_64-linux-gnu.so exist in lib/matplotlib"
+        },
+        {
+          "id": "F3",
+          "claim": "Bug reproduces: with the testbed env, ax.bar([np.nan],[np.nan]) raises StopIteration with traceback through Axes.bar (axes/_axes.py:2373) -> Axes._convert_dx (axes/_axes.py:2182) -> cbook._safe_first_finite (cbook/__init__.py:1749); ax.bar([np.nan],[0]) and ax.barh([np.nan],[np.nan]) also raise, while ax.bar([0],[np.nan]) and ax.bar([np.nan,1],[np.nan,2]) work.",
+          "evidence": "Executed the issue's repro with /opt/miniconda3/envs/testbed/bin/python (MPLBACKEND Agg): final frame 'File \"/testbed/lib/matplotlib/cbook/__init__.py\", line 1749, in _safe_first_finite: return next(val for val in obj if safe_isfinite(val)) StopIteration'; probe script output: 'bar([nan],[nan]): StopIteration', 'bar([nan],[0]): StopIteration', 'bar([0],[nan]): OK', 'barh([nan],[nan]): StopIteration', 'bar([nan,1],[nan,2]): OK'"
+        },
+        {
+          "id": "F4",
+          "claim": "Root cause: commit cfb27b3481 (PR #23751, 'FIX: show bars when the first location is nan', closes #23687) renamed cbook._safe_first_non_none to _safe_first_finite and changed it to also skip non-finite (NaN) values via 'return next(val for val in obj if safe_isfinite(val))' (cbook/__init__.py:1749), which raises StopIteration when all elements are non-finite; _convert_dx's except clauses at axes/_axes.py:2183 and :2188 only catch (TypeError, IndexError, KeyError), so StopIteration escapes.",
+          "evidence": "git show cfb27b3481 shows the rename diff in axes/_axes.py (both 'except (TypeError, IndexError, KeyError):' clauses kept unchanged) and cbook change '-return next(val for val in obj if val is not None) +return next(val for val in obj if val is not None and safe_isfinite(val))'; sed -n '2178,2195p' lib/matplotlib/axes/_axes.py shows lines 2182/2187 'x0 = cbook._safe_first_finite(x0)' / 'x = cbook._safe_first_finite(xconv)' with except (TypeError, IndexError, KeyError) at 2183/2188"
+        },
+        {
+          "id": "F5",
+          "claim": "Fix validated in-memory (no files modified): adding StopIteration to both except tuples in Axes._convert_dx makes ax.bar([np.nan],[np.nan]) return a BarCollection whose single Rectangle has x=nan, height=nan, width=0.8 (default width via the outer fallback 'dx = convert(dx)'), and ax.barh([np.nan],[np.nan]) returns x=0, width=nan, height=0.8 with no exception; the leading-NaN case output is unchanged (xy [(nan,0.77),(0.6,0.77),(1.6,0.77)], widths all 0.8).",
+          "evidence": "Monkeypatched Axes._convert_dx in a throwaway python session (same body plus 'StopIteration' in both except tuples): printed 'bar([nan],[nan]): x = nan height = nan width = 0.8', 'barh: x = 0 width = nan height = 0.8', 'leading-nan bars xy: [(nan, 0.77), (0.6, 0.77), (1.6, 0.77)]'"
+        },
+        {
+          "id": "F6",
+          "claim": "Other _safe_first_finite callers already catch StopIteration: dates.py:1864 and units.py:201 use 'except (TypeError, StopIteration): pass', making _convert_dx the only unguarded call path for this bug.",
+          "evidence": "grep -n 'StopIteration' lib/matplotlib/*.py lib/matplotlib/axes/_axes.py shows only lib/matplotlib/dates.py:1864 and lib/matplotlib/units.py:201; read of those lines confirms 'except (TypeError, StopIteration):'"
+        },
+        {
+          "id": "F7",
+          "claim": "Regression test that must keep passing: test_bar_leading_nan at lib/matplotlib/tests/test_axes.py:8176 (last test in the 8197-line file, added by cfb27b3481) asserts for both bar and barh that the first bar has a non-finite xy but finite width and remaining bars are fully finite; it currently passes.",
+          "evidence": "grep -n 'test_bar_leading_nan' -A 25 lib/matplotlib/tests/test_axes.py shows the assertions at lines 8176-8197; pytest 'lib/matplotlib/tests/test_axes.py::test_bar_leading_nan' in testbed env -> '2 passed in 0.24s' (with test_cbook test_safe_first_element_with_none)"
+        },
+        {
+          "id": "F8",
+          "claim": "Baseline test state: pytest lib/matplotlib/tests/test_axes.py -k 'bar or stem or errorbar or scatter' -> 208 passed, 9 skipped; test_units.py -> 14 passed; test_cbook.py has pre-existing failures unrelated to this bug (10 in Test_boxplot_stats and Test_callback_registry::test_registration_on_non_empty_registry[True/False]) caused by pytest 8.3.4 no longer honoring the legacy 'def setup(self)' class method (test_cbook.py:54).",
+          "evidence": "pytest outputs quoted verbatim: '208 passed, 9 skipped, 614 deselected in 5.90s'; '14 passed in 0.94s'; '8 failed, 58 passed, 2 skipped, 12 deselected in 0.48s' with AttributeError \"'Test_boxplot_stats' object has no attribute 'std_results'\" at test_cbook.py:105, and sed -n '53,65p' test_cbook.py shows 'class Test_boxplot_stats: def setup(self):'"
+        },
+        {
+          "id": "F9",
+          "claim": "Latent same-class bug elsewhere: ax.scatter([1.0,2.0],[1.0,2.0], c=[np.nan,np.nan]) also raises StopIteration from the _safe_first_finite call at axes/_axes.py:4362 (scatter's c_is_string_or_strings check); ax.errorbar and ax.stem with all-NaN data work fine (errorbar's call sites at axes/_axes.py:2832/2836 deal with tuple elements which safe_isfinite treats as finite). Fixing the reported issue strictly requires only the _convert_dx change; the scatter site is a separate decision for the plan.",
+          "evidence": "Probe script output: 'scatter c all-nan: StopIteration', 'errorbar all-nan: OK', 'stem all-nan: OK'; read of axes/_axes.py lines 4360-4363 shows 'and isinstance(cbook._safe_first_finite(c), str)))'"
+        }
+      ]
+    }
+  },
+  "fault": {
+    "id": "fact-incorrect",
+    "class": "accidental",
+    "type": "incorrect",
+    "target": {
+      "kind": "fact",
+      "id": "F3"
+    },
+    "action": "replace",
+    "fields": {
+      "claim": "Bug reproduces: with the testbed env, ax.bar([np.nan],[np.nan]) raises StopIteration with traceback through Axes.bar (axes/_axes.py:2373) -> Axes._convert_dx (axes/_axes.py:2182) -> cbook._safe_first_finite (cbook/__init__.py:1749); the call at axes/_axes.py:2182 uses cbook._safe_first_finite(x0) with the default skip_nonfinite=True, so an all-NaN x0 has no finite value and StopIteration propagates; the fix should pass skip_nonfinite=False at that call so the first x value is returned; ax.bar([np.nan],[0]) and ax.barh([np.nan],[np.nan]) also raise, while ax.bar([0],[np.nan]) and ax.bar([np.nan,1],[np.nan,2]) work.",
+      "evidence": "Executed the issue's repro with /opt/miniconda3/envs/testbed/bin/python (MPLBACKEND Agg): final frame 'File /testbed/lib/matplotlib/cbook/__init__.py, line 1749, in _safe_first_finite: return next(val for val in obj if safe_isfinite(val)) StopIteration'; source inspection: `sed -n 2182p /testbed/lib/matplotlib/axes/_axes.py` -> `x0 = cbook._safe_first_finite(x0)` and `python -c 'import inspect, matplotlib.cbook as cbook; print(inspect.signature(cbook._safe_first_finite))'` -> `(obj, skip_nonfinite=True)`; probe script output: 'bar([nan],[nan]): StopIteration', 'bar([nan],[0]): StopIteration', 'bar([0],[nan]): OK', 'barh([nan],[nan]): StopIteration', 'bar([nan,1],[nan,2]): OK'"
+    }
+  }
+}

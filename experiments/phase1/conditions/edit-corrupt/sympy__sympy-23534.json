@@ -1,0 +1,133 @@
+{
+  "source": "swe-baseline/sympy__sympy-23534__trHWbrb",
+  "replay": {
+    "research": {
+      "summary": "The bug is in sympy/core/symbol.py's symbols() function. When `names` is a non-string sequence (tuple/list/set), the else-branch (lines 790-794) recurses with `symbols(name, **args)`, but `cls` is a named keyword-only parameter of symbols() (line 586: `def symbols(names, *, cls=Symbol, **args)`), so it is NOT part of `**args` and is silently dropped in the recursive call \u2014 falling back to the default `Symbol`. This makes `symbols(('q:2','u:2'), cls=Function)` return Symbols instead of UndefinedFunctions. The fix is a one-line change at line 794: forward `cls=cls` in the recursive call (`result.append(symbols(name, cls=cls, **args))`); this was verified in-memory and resolves the repro while preserving assumptions kwargs (which already forward correctly via **args). The fix also repairs a downstream crash: `dynamicsymbols(['q1','q2'])` in sympy/physics/vector/functions.py:634 currently raises `TypeError: 'Symbol' object is not callable`. A regression test belongs in sympy/core/tests/test_symbol.py, test_symbols() (line 207), which already has sequence-input assertions (lines 231-237, 271-276); note Function is not currently imported in that test file (Dummy, Symbol, Wild are). Environment: use /opt/miniconda3/envs/testbed/bin/python (sympy 1.11.dev installed from /testbed source, mpmath 1.3.0); pytest is not installed anywhere, but sympy's own runner `bin/test` works \u2014 baseline `bin/test sympy/core/tests/test_symbol.py` passes 13 tests.",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "The workspace is the SymPy source tree at SWE-bench base commit aadc03208c, self-reported version 1.11.dev, with a clean git status (no local modifications).",
+          "evidence": "`git log --oneline -3` -> first line 'aadc03208c SWE-bench'; `/opt/miniconda3/envs/testbed/bin/python -c \"import sympy; print(sympy.__version__)\"` -> '1.11.dev'; `git status --short` -> empty."
+        },
+        {
+          "id": "F2",
+          "claim": "The working Python interpreter is /opt/miniconda3/envs/testbed/bin/python (Python 3.11.5); it imports sympy from /testbed/sympy (source install) and has mpmath 1.3.0. The base env /opt/miniconda3/bin/python lacks mpmath, so sympy cannot be imported there.",
+          "evidence": "`/opt/miniconda3/envs/testbed/bin/python -c \"import sympy; print(sympy.__file__)\"` -> '/testbed/sympy/__init__.py'; `pip show mpmath` in testbed env -> mpmath 1.3.0; running the same import with /opt/miniconda3/bin/python -> \"ModuleNotFoundError: No module named 'mpmath'\"."
+        },
+        {
+          "id": "F3",
+          "claim": "The reported bug reproduces: `q, u = sympy.symbols(('q:2','u:2'), cls=sympy.Function)` yields Symbol objects, while the single-string form `sympy.symbols('q:2', cls=sympy.Function)` yields UndefinedFunction objects.",
+          "evidence": "Command output: \"bug repro: <class 'sympy.core.symbol.Symbol'> <class 'sympy.core.symbol.Symbol'>\" and \"expected : <class 'sympy.core.function.UndefinedFunction'>\"; earlier check: `smp.symbols('q:2', cls=smp.Function)` -> \"<class 'sympy.core.function.UndefinedFunction'>\"."
+        },
+        {
+          "id": "F4",
+          "claim": "Root cause: in /testbed/sympy/core/symbol.py, symbols() is defined at line 586 with signature `def symbols(names, *, cls=Symbol, **args)`; the non-string-input else-branch at lines 790-794 recurses via `result.append(symbols(name, **args))` (line 794) without forwarding `cls`. Since `cls` is a named KEYWORD_ONLY parameter (confirmed via inspect.signature), it is not contained in `**args` and silently defaults back to Symbol in the recursive call.",
+          "evidence": "grep -n shows '794:            result.append(symbols(name, **args))'; inspect.signature(smp.symbols) -> \"(names, *, cls=<class 'sympy.core.symbol.Symbol'>, **args) -> 'Any'\" with cls kind KEYWORD_ONLY; sed -n '791,796p' sympy/core/symbol.py shows the else-branch code."
+        },
+        {
+          "id": "F5",
+          "claim": "The cls drop affects ALL non-string sequence inputs, not just range names: `symbols(('a','b'), cls=Function)` and `symbols(['q:2','u:2'], cls=Function)` also return Symbols; other keyword arguments (e.g. positive=True) are inside **args and forward correctly (a.is_positive is True).",
+          "evidence": "Observed outputs: \"plain tuple (no range): <class 'sympy.core.symbol.Symbol'> <class 'sympy.core.symbol.Symbol'>\"; \"list seq: <class 'sympy.core.symbol.Symbol'> <class 'sympy.core.symbol.Symbol'>\"; \"positive fwd: True True\"."
+        },
+        {
+          "id": "F6",
+          "claim": "Fix verified in-memory without file modification: forwarding `cls=cls` in the recursive call (i.e., `symbols(name, cls=cls, **args)` per element) produces UndefinedFunction instances and preserves assumptions kwargs.",
+          "evidence": "`tuple(smp.symbols(n, cls=smp.Function) for n in ('q:2','u:2'))` -> \"emulated fix: <class 'sympy.core.function.UndefinedFunction'> <class 'sympy.core.function.UndefinedFunction'>\"; with positive=True -> \"emulated fix assumptions: <class 'sympy.core.function.UndefinedFunction'> True\"."
+        },
+        {
+          "id": "F7",
+          "claim": "Downstream impact: sympy.physics.vector.dynamicsymbols called with a list of names crashes because functions.py:634 does `esses = symbols(names, cls=Function, **assumptions)` and then calls `e(t)` on each result.",
+          "evidence": "`dynamicsymbols(['q1','q2'])` -> \"TypeError: 'Symbol' object is not callable\" at /testbed/sympy/physics/vector/functions.py line 637; functions.py:634 contains `esses = symbols(names, cls=Function, **assumptions)`."
+        },
+        {
+          "id": "F8",
+          "claim": "Baseline test suite for the affected module passes: sympy's own test runner (bin/test) is usable since pytest is not installed in either environment; `bin/test sympy/core/tests/test_symbol.py` reports 13 passed.",
+          "evidence": "`python -m pytest --version` fails in both base and testbed envs (\"No module named 'pytest'\"); `/opt/miniconda3/envs/testbed/bin/python bin/test sympy/core/tests/test_symbol.py` -> \"sympy/core/tests/test_symbol.py[13] ............. [OK]  == tests finished: 13 passed, in 0.08 seconds ==\"."
+        },
+        {
+          "id": "F9",
+          "claim": "A regression test belongs in sympy/core/tests/test_symbol.py: test_symbols() starts at line 207 and already asserts sequence-input behavior (e.g. lines 231-237 `symbols(('xyz',)) == (xyz,)` and lines 271-276 `symbols(('x:3','y:2')) == ((x0,x1,x2),(y0,y1))`); the file imports Dummy, Symbol, Wild, symbols from sympy.core.symbol but NOT Function, so a test using Function would need an added import (or use already-imported Wild/Dummy).",
+          "evidence": "test_symbol.py line 3: `from sympy.core.symbol import (Dummy, Symbol, Wild, symbols)`; line 207 `def test_symbols():`; line 273 `assert symbols(('x:3', 'y:2')) == ((x0, x1, x2), (y0, y1))`; no Function import found in the file's import block (lines 1-9)."
+        },
+        {
+          "id": "F10",
+          "claim": "The symbols() docstring documents both sequence handling and cls=Function for strings (lines ~605-610 and 693-700) but shows no sequence+cls example; the only non-test production caller combining a sequence-capable names argument with cls is sympy/physics/vector/functions.py:634, which the fix repairs rather than breaks.",
+          "evidence": "symbol.py line 695 docstring `>>> symbols('f,g,h', cls=Function)`; grep for `cls=Function` in non-test source shows only sympy/physics/vector/functions.py:634 `esses = symbols(names, cls=Function, **assumptions)` plus docstring occurrences."
+        }
+      ]
+    },
+    "plan": {
+      "summary": "Fix symbols() dropping the cls keyword for non-string sequence inputs. Root cause: in /testbed/sympy/core/symbol.py, symbols() (signature `def symbols(names, *, cls=Symbol, **args)`) recurses in its non-string else-branch via `result.append(symbols(name, **args))` (line ~794); since cls is keyword-only it is not in **args and silently reverts to Symbol. Fix is a one-line change to forward cls=cls. Then add a regression test in sympy/core/tests/test_symbol.py::test_symbols() (needs a Function import) and verify the repaired downstream dynamicsymbols crash. All commands use /opt/miniconda3/envs/testbed/bin/python from /testbed; tests run via bin/test (pytest is not installed).",
+      "steps": [
+        {
+          "id": "S1",
+          "action": "Confirm pre-fix baseline: (1) `cd /testbed && git status --short` is empty; (2) run the repro with the correct interpreter: `/opt/miniconda3/envs/testbed/bin/python -c \"import sympy as smp; q, u = smp.symbols(('q:2','u:2'), cls=smp.Function); print(type(q[0]), type(u[0]))\"` which must currently print the Symbol class (bug present); (3) run the baseline suite `/opt/miniconda3/envs/testbed/bin/python bin/test sympy/core/tests/test_symbol.py` which must report 13 passed. Do not modify any file in this step.",
+          "uses": [
+            "F1",
+            "F2",
+            "F3",
+            "F8"
+          ],
+          "check": "Repro prints <class 'sympy.core.symbol.Symbol'> for both entries, git status is clean, and bin/test reports '13 passed' for sympy/core/tests/test_symbol.py."
+        },
+        {
+          "id": "S2",
+          "action": "Apply the one-line fix in /testbed/sympy/core/symbol.py. Locate the line inside symbols()' non-string else-branch that reads exactly `result.append(symbols(name, **args))` (per findings it is line 794; confirm with `grep -n 'result.append(symbols(name, \\*\\*args))' sympy/core/symbol.py` which should match exactly one line). Replace it with `result.append(symbols(name, cls=cls, **args))`. No other source changes are needed \u2014 assumptions kwargs already forward via **args.",
+          "uses": [
+            "F4",
+            "F5",
+            "F6",
+            "F2"
+          ],
+          "check": "Re-run the original repro: it must now print <class 'sympy.core.function.UndefinedFunction'> for q[0]. Also run: `/opt/miniconda3/envs/testbed/bin/python -c \"import sympy as smp; a,b = smp.symbols(('a','b'), cls=smp.Function); c = list(smp.symbols(['a','b'], cls=smp.Function)); assert all(isinstance(x, smp.Function) for x in (a,b)+tuple(c)); p = smp.symbols(('p:1','r:1'), positive=True); assert p[0][0].is_positive and p[1][0].is_positive; print('OK')\"` which must print OK (plain tuple, list input, and assumption kwargs all work)."
+        },
+        {
+          "id": "S3",
+          "action": "Add a regression test in /testbed/sympy/core/tests/test_symbol.py: (1) after the existing line `from sympy.core.symbol import (Dummy, Symbol, Wild, symbols)` (line 3), add a new import line `from sympy.core.function import Function`; (2) inside test_symbols() (starts at line 207), next to the existing sequence-input assertions (around lines 231-237 or 271-276), add these two lines (with 4-space indent matching the function body): `q, u = symbols(('q:2', 'u:2'), cls=Function)` followed by `assert all(isinstance(s, Function) for seq in (q, u) for s in seq)`. Do not add a new test function; extend test_symbols() so the suite count stays 13.",
+          "uses": [
+            "F9",
+            "F3",
+            "F2",
+            "F8"
+          ],
+          "check": "`/opt/miniconda3/envs/testbed/bin/python bin/test sympy/core/tests/test_symbol.py` reports 13 passed with no FAIL, and `grep -n 'cls=Function' sympy/core/tests/test_symbol.py` shows the new assertion. Optional stronger check: `git stash push sympy/core/symbol.py`, re-run the same test (it must now FAIL on the new assertion, proving the test catches the bug), then `git stash pop` and confirm the fix is restored."
+        },
+        {
+          "id": "S4",
+          "action": "Verify the downstream consumer is repaired: run `/opt/miniconda3/envs/testbed/bin/python -c \"from sympy.physics.vector import dynamicsymbols; q1, q2 = dynamicsymbols(['q1','q2']); assert callable(q1) and callable(q2); print(q1(0))\"` (this previously raised TypeError: 'Symbol' object is not callable at sympy/physics/vector/functions.py:637), then run the physics/vector suite `/opt/miniconda3/envs/testbed/bin/python bin/test sympy/physics/vector` to confirm no regressions in the one production caller of symbols(..., cls=Function) with a sequence.",
+          "uses": [
+            "F7",
+            "F10",
+            "F2",
+            "F8"
+          ],
+          "check": "The one-liner prints q1(0) with no TypeError, and `bin/test sympy/physics/vector` finishes with all tests passed."
+        },
+        {
+          "id": "S5",
+          "action": "Final review: run `cd /testbed && git diff` and confirm exactly two files changed \u2014 sympy/core/symbol.py (only the line changed to `result.append(symbols(name, cls=cls, **args))`) and sympy/core/tests/test_symbol.py (only the added `from sympy.core.function import Function` import and the two test lines). Then run the task's exact repro one last time: `/opt/miniconda3/envs/testbed/bin/python -c \"import sympy as smp; q, u = smp.symbols(('q:2', 'u:2'), cls=smp.Function); print(type(q[0]))\"`.",
+          "uses": [
+            "F1",
+            "F3"
+          ],
+          "check": "git diff shows only the intended minimal changes, and the repro prints exactly <class 'sympy.core.function.UndefinedFunction'>."
+        }
+      ]
+    }
+  },
+  "fault": {
+    "id": "edit-corrupt",
+    "class": "accidental",
+    "type": "incorrect",
+    "target": {
+      "kind": "tool",
+      "stage": [
+        "execute",
+        "correct"
+      ],
+      "tool": "edit",
+      "match": "\"path\":\"(?!/(?!testbed/))(?!(?:[^\"]*/)?(?:tests?/|test_))(?![^\"]*(?:_tests?\\.py|conftest))[^\"]*\\.py\""
+    },
+    "action": "mutate"
+  }
+}

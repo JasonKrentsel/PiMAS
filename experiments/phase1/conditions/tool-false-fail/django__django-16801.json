@@ -1,0 +1,170 @@
+{
+  "source": "swe-baseline/django__django-16801__47SjAPc",
+  "replay": {
+    "research": {
+      "summary": "The workspace is a Django source checkout (5.0.dev, base commit 3b62d8c83e from 2023-05-02) where ImageField.contribute_to_class (django/db/models/fields/files.py:438-445) unconditionally connects the update_dimension_fields handler to the post_init signal for every non-abstract model that has an ImageField, even when width_field/height_field are unset and the handler is a pure noop (early return at files.py:462-464). post_init is sent on every Model.__init__ (base.py:572), so the noop handler runs on every instantiation. Empirically verified that a model with ImageField(upload_to=\"x\") (no dimension fields) does have the receiver connected. The fix is to gate the connection on (self.width_field or self.height_field), preserving the existing non-abstract-model guard (needed for abstract models, e.g. test model AbstractPersonWithHeight/PersonWithHeight). The assignment path (ImageFileDescriptor.__set__ calling update_dimension_fields(force=True), files.py:369-379) is independent of the signal, so no behavior change is expected. Tests: tests/model_fields/test_imagefield.py (46 tests) and models in tests/model_fields/models.py (Person has no dimension fields; PersonWithHeightAndWidth/PersonDimensionsFirst/PersonTwoImages do). Correct test environment is the conda env `testbed` (/opt/miniconda3/envs/testbed, Python 3.11.10, Pillow 10.4.0, asgiref, sqlparse, Django installed editable from /testbed); the default base python and system python lack these deps. Baseline: model_fields+signals = 475 tests OK (skipped=9); model_fields.test_imagefield = 46 tests OK. Run via `conda run -n testbed python tests/runtests.py <labels>` from /testbed. No existing test asserts on post_init connections for ImageField, so verification of the fix should check post_init._live_receivers() on the test models (e.g., no receiver for Person, receiver present for PersonWithHeightAndWidth) and keep all existing dimension tests green.",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "The workspace /testbed is a Django framework source checkout (not a user app): it contains django/, tests/, docs/ and the dev version is 5.0.alpha; git HEAD is an empty SWE-bench marker commit 64975a12f5 on top of base commit 3b62d8c83e (2023-05-02).",
+          "evidence": "/testbed/django/__init__.py:3 'VERSION = (5, 0, 0, \"alpha\", 0)'; `git log -3 --format='%H %ad %s' --date=short` shows '64975a12f5... 2026-08-13 SWE-bench' and '3b62d8c83e... 2023-05-02 Refs #31369...'; `git show 64975a12f5 --stat` lists no file changes."
+        },
+        {
+          "id": "F2",
+          "claim": "ImageField.contribute_to_class unconditionally connects self.update_dimension_fields to signals.post_init for every non-abstract model that defines an ImageField, regardless of whether width_field/height_field are set.",
+          "evidence": "/testbed/django/db/models/fields/files.py:438-445: 'def contribute_to_class(self, cls, name, **kwargs): ... if not cls._meta.abstract: signals.post_init.connect(self.update_dimension_fields, sender=cls)'."
+        },
+        {
+          "id": "F3",
+          "claim": "update_dimension_fields is a noop when width_field and height_field are both unset: it computes has_dimension_fields = self.width_field or self.height_field and returns immediately if that is falsy (or if the field is deferred).",
+          "evidence": "/testbed/django/db/models/fields/files.py:462-464: 'has_dimension_fields = self.width_field or self.height_field / if not has_dimension_fields or self.attname not in instance.__dict__: return'."
+        },
+        {
+          "id": "F4",
+          "claim": "post_init is sent from Model.__init__ for every model instance (the performance cost described in the issue), and post_init is a caching ModelSignal.",
+          "evidence": "/testbed/django/db/models/base.py:572 'post_init.send(sender=cls, instance=self)' (last statement of Model.__init__); /testbed/django/db/models/signals.py:43 'post_init = ModelSignal(use_caching=True)'."
+        },
+        {
+          "id": "F5",
+          "claim": "Empirically confirmed the bug: in the testbed env, a model with only 'img = models.ImageField(upload_to=\"x\")' (width_field=None, height_field=None) has the bound method ImageField.update_dimension_fields connected to post_init (same receiver list as a model that does define width/height fields), while instantiating it succeeds with the handler returning early.",
+          "evidence": "Script run with /opt/miniconda3/envs/testbed/bin/python defining NoDims/WithDims models: output 'NoDims receivers: ['[<bound method ImageField.update_dimension_fields of <...ImageField: img>>]', '[]']' (identical receiver present for NoDims and WithDims); 'width_field: None height_field: None'."
+        },
+        {
+          "id": "F6",
+          "claim": "The only post_init connection in the framework for file/image fields is files.py:445; FileField does not connect any signal, and the unrelated django.forms FileField/ImageField classes (django/forms/fields.py:620,692) are form fields, not model fields.",
+          "evidence": "`grep -rn 'post_init.connect|post_init.send' /testbed/django --include='*.py'` returns only files.py:445 and base.py:572; `grep -rn 'class ImageField|class FileField' /testbed/django` shows files.py:224 FileField, files.py:390 ImageField, forms/fields.py:620/692."
+        },
+        {
+          "id": "F7",
+          "claim": "The image-dimension update on attribute assignment does not rely on the post_init signal, so gating the signal connection cannot break assignment: ImageFileDescriptor.__set__ calls self.field.update_dimension_fields(instance, force=True) directly when previous_file is not None.",
+          "evidence": "/testbed/django/db/models/fields/files.py:369-379 (ImageFileDescriptor.__set__ comment referencing bug #11084 and 'if previous_file is not None: self.field.update_dimension_fields(instance, force=True)')."
+        },
+        {
+          "id": "F8",
+          "claim": "Correct test environment is conda env 'testbed' at /opt/miniconda3/envs/testbed: Python 3.11.10 with asgiref 3.8.1, sqlparse 0.5.1, pillow 10.4.0, numpy 2.1.2 and Django 5.0.dev20230502184211 installed editable from /testbed.",
+          "evidence": "`/opt/miniconda3/envs/testbed/bin/pip list | grep -i -E 'pillow|asgiref|sqlparse|numpy|django'` shows 'Django 5.0.dev20230502184211 /testbed', 'pillow 10.4.0', 'asgiref 3.8.1', 'sqlparse 0.5.1', 'numpy 2.1.2'; `/opt/miniconda3/envs/testbed/bin/python --version` -> Python 3.11.10; spec matches /root/environment.yml (prefix /opt/miniconda3/envs/testbed, pip deps incl. pillow==10.4.0, asgiref==3.8.1)."
+        },
+        {
+          "id": "F9",
+          "claim": "The default shell python (/opt/miniconda3/bin/python, Python 3.11.5) and system python (/usr/bin/python, 3.10.12) cannot run the Django test suite: asgiref, sqlparse and Pillow are missing there, so `python tests/runtests.py` fails with ModuleNotFoundError (first 'No module named django' without PYTHONPATH, then 'No module named asgiref' with PYTHONPATH=/testbed).",
+          "evidence": "`python tests/runtests.py model_fields.test_imagefield` -> 'ModuleNotFoundError: No module named django'; `PYTHONPATH=/testbed python tests/runtests.py ...` -> 'ModuleNotFoundError: No module named asgiref' at django/conf/__init__.py:19; `python -c 'import PIL'` -> 'ModuleNotFoundError: No module named PIL'; /usr/bin/python --version -> Python 3.10.12 with 'No module named asgiref'."
+        },
+        {
+          "id": "F10",
+          "claim": "Baseline test results in the testbed env (pre-change): model_fields.test_imagefield passes 46/46, and the combined model_fields + signals suites pass 475 tests with 9 skips.",
+          "evidence": "`/opt/miniconda3/envs/testbed/bin/python tests/runtests.py model_fields.test_imagefield -v 2` -> 'Ran 46 tests in 0.117s OK'; `... runtests.py model_fields signals` -> 'Ran 475 tests in 1.087s OK (skipped=9)'; also `conda run -n testbed python tests/runtests.py model_fields.test_imagefield` -> 'Ran 46 tests ... OK'."
+        },
+        {
+          "id": "F11",
+          "claim": "ImageField test suite and models live in tests/model_fields: test_imagefield.py has 7 test classes (all @skipIf(Image is None) so they run only with Pillow), and models.py defines the ImageField models under a 'if Image:' guard (line 253): Person (line 276, ImageField with NO width/height fields), AbstractPersonWithHeight (284, abstract, height_field set), PersonWithHeight (299, concrete subclass), PersonWithHeightAndWidth (307), PersonDimensionsFirst (322, dimension fields declared before the ImageField, for bug #11196), PersonTwoImages (337).",
+          "evidence": "`grep -n 'class ImageField|skipIf' /testbed/tests/model_fields/test_imagefield.py` shows classes at lines 106-107, 209-210, 323-324 (ImageFieldNoDimensionsTests, PersonModel=Person at line 329), 332-333, 341-342, 351-352, 362; `grep -n '^if Image:|class Person...' /testbed/tests/model_fields/models.py` shows lines 253, 276, 284, 299, 307, 322, 337."
+        },
+        {
+          "id": "F12",
+          "claim": "The abstract-model guard must be preserved: the existing 'if not cls._meta.abstract' condition exists so the receiver is attached on the concrete subclass (e.g., PersonWithHeight via abstract base AbstractPersonWithHeight), and ImageFieldOneDimensionTests (PersonModel=PersonWithHeight) exercises dimension updates after init through this path.",
+          "evidence": "/testbed/django/db/models/fields/files.py:443-444 comment 'Only run post-initialization dimension update on non-abstract models' + 'if not cls._meta.abstract:'; /testbed/tests/model_fields/test_imagefield.py:333-338 class ImageFieldOneDimensionTests with 'PersonModel = PersonWithHeight'; /testbed/tests/model_fields/models.py:284-304 AbstractPersonWithHeight (Meta.abstract=True) / PersonWithHeight."
+        },
+        {
+          "id": "F13",
+          "claim": "No existing test in tests/model_fields/test_imagefield.py references post_init or signal receivers, so a regression test for this fix would be new; the fix can be verified by checking post_init._live_receivers(model) shows update_dimension_fields for models with dimension fields (e.g., PersonWithHeightAndWidth) and not for models without (Person).",
+          "evidence": "`grep -n 'post_init' /testbed/tests/model_fields/test_imagefield.py` returns nothing; grep for 'update_dimension_fields' across /testbed/tests and /testbed/docs returns no matches (only the django/ source hits)."
+        },
+        {
+          "id": "F14",
+          "claim": "The minimal fix consistent with the issue: change the condition at files.py:444 from 'if not cls._meta.abstract:' to 'if not cls._meta.abstract and (self.width_field or self.height_field):' (and update the adjacent comment to note dimension fields are required); width_field/height_field are set only in ImageField.__init__ so the decision is static at class-definition time. No docs mention post_init for ImageField (docs/ref/models/fields.txt documents width_field/height_field without post_init), so docs changes are not required for correctness.",
+          "evidence": "/testbed/django/db/models/fields/files.py:410-416 ImageField.__init__ 'self.width_field, self.height_field = width_field, height_field'; `grep -n 'post_init' /testbed/docs/ref/models/fields.txt` -> no output (exit code 1); issue text states the handler 'will return right away' when width_field/height_field are unset, matching files.py:462-464."
+        }
+      ]
+    },
+    "plan": {
+      "summary": "Gate the ImageField post_init signal connection on width_field/height_field in django/db/models/fields/files.py so models without dimension fields no longer pay for a noop handler on every instantiation, preserving the non-abstract-model guard; verify receiver presence/absence on the existing test models and keep model_fields + signals suites green in the conda 'testbed' env.",
+      "steps": [
+        {
+          "id": "S1",
+          "action": "Establish the pre-change baseline using the conda 'testbed' env (do NOT use /opt/miniconda3/bin/python or /usr/bin/python \u2014 they lack Pillow/asgiref/sqlparse and fail with ModuleNotFoundError). From /testbed run: `conda run -n testbed python tests/runtests.py model_fields.test_imagefield`. Optionally also run `conda run -n testbed python tests/runtests.py model_fields signals`.",
+          "uses": [
+            "F8",
+            "F9",
+            "F10"
+          ],
+          "check": "Output ends with 'Ran 46 tests ... OK' for model_fields.test_imagefield (and 'Ran 475 tests ... OK (skipped=9)' if the combined run is done)."
+        },
+        {
+          "id": "S2",
+          "action": "Reproduce the bug before changing anything. Create a temporary script /testbed/check_receivers.py that sets DJANGO_SETTINGS_MODULE=tests.test_sqlite (if that import fails, fall back to tests.settings), calls django.setup(), then for each of model_fields.models Person, PersonWithHeight, PersonWithHeightAndWidth prints the number of post_init._live_receivers(model) whose __func__ is ImageField.update_dimension_fields, and finally instantiates Person() and PersonWithHeightAndWidth() to confirm no crash. Run: `cd /testbed && /opt/miniconda3/envs/testbed/bin/python check_receivers.py`.",
+          "uses": [
+            "F4",
+            "F5",
+            "F8",
+            "F11"
+          ],
+          "check": "Pre-fix output shows ImageField receiver count 1 for ALL THREE models (Person included, confirming the unnecessary connection), plus 'instantiation ok'."
+        },
+        {
+          "id": "S3",
+          "action": "Apply the fix in /testbed/django/db/models/fields/files.py, ImageField.contribute_to_class (around lines 438-445): change the condition `if not cls._meta.abstract:` to `if not cls._meta.abstract and (self.width_field or self.height_field):`, and update the adjacent comment to state the post-init dimension update only runs on non-abstract models that declare width_field/height_field. Do NOT touch the assignment path (ImageFileDescriptor.__set__ calls update_dimension_fields directly and is independent of the signal), and do NOT remove the abstract guard (concrete subclasses of abstract bases like PersonWithHeight must still get the receiver). This is the only post_init.connect for file/image fields in the framework, so no other file needs changing.",
+          "uses": [
+            "F2",
+            "F3",
+            "F6",
+            "F7",
+            "F12",
+            "F14"
+          ],
+          "check": "`cd /testbed && git diff --stat` shows exactly one changed file (django/db/models/fields/files.py), and `git diff` shows the new condition line `if not cls._meta.abstract and (self.width_field or self.height_field):` plus the updated comment."
+        },
+        {
+          "id": "S4",
+          "action": "Verify the behavior change by re-running the same temporary script: `cd /testbed && /opt/miniconda3/envs/testbed/bin/python check_receivers.py`. Then remove the temporary script (`rm /testbed/check_receivers.py`).",
+          "uses": [
+            "F4",
+            "F5",
+            "F11",
+            "F12",
+            "F13"
+          ],
+          "check": "Output shows ImageField receiver count 0 for Person (no dimension fields) but 1 for PersonWithHeight (abstract-base path preserved) and 1 for PersonWithHeightAndWidth, plus 'instantiation ok'."
+        },
+        {
+          "id": "S5",
+          "action": "Add a regression test to /testbed/tests/model_fields/test_imagefield.py: a new SimpleTestCase (e.g., class ImageFieldPostInitSignalTests, not wrapped in skipIf since Pillow is not needed) with two tests using signals.post_init._live_receivers(...) filtered by `getattr(receiver, '__func__', None) is ImageField.update_dimension_fields`: (1) assert the list is empty for Person (no width/height fields); (2) assert the list has length 1 for PersonWithHeightAndWidth. Add the needed imports (e.g., `signals` to the `from django.db.models import ...` line; Person and PersonWithHeightAndWidth are already imported from .models; ImageField is already imported from django.db.models). Place the class near the other test classes.",
+          "uses": [
+            "F11",
+            "F13"
+          ],
+          "check": "`grep -n 'class ImageFieldPostInitSignalTests' /testbed/tests/model_fields/test_imagefield.py` finds the new class, and `conda run -n testbed python tests/runtests.py model_fields.test_imagefield` reports 'Ran 48 tests ... OK' (baseline 46 + 2 new) with no failures."
+        },
+        {
+          "id": "S6",
+          "action": "Run the broader relevant suites in the conda 'testbed' env from /testbed: `conda run -n testbed python tests/runtests.py model_fields signals`. This covers all existing ImageField dimension tests (including ImageFieldOneDimensionTests with PersonModel=PersonWithHeight, PersonDimensionsFirst for bug #11196, PersonTwoImages, and the deferred-field paths) plus the whole signals suite, confirming no behavior change from removing the noop connection.",
+          "uses": [
+            "F8",
+            "F10",
+            "F11",
+            "F12"
+          ],
+          "check": "Output is 'Ran 477 tests ... OK (skipped=9)' (baseline 475 + 2 new tests) with zero failures and zero errors; final `git diff` contains only the files.py condition/comment change and the test_imagefield.py addition."
+        }
+      ]
+    }
+  },
+  "fault": {
+    "id": "tool-false-fail",
+    "class": "accidental",
+    "type": "incorrect",
+    "target": {
+      "kind": "tool",
+      "stage": "execute",
+      "tool": [
+        "bash",
+        "read"
+      ],
+      "results": true,
+      "after": [
+        "edit",
+        "write"
+      ]
+    },
+    "action": "fail"
+  }
+}

@@ -1,0 +1,137 @@
+{
+  "source": "swe-baseline/django__django-13410__Bc3RS6X",
+  "replay": {
+    "research": {
+      "summary": "The workspace is the Django 3.2.0-alpha source tree at /testbed. The reported bug is confirmed in the posix/fcntl branch of /testbed/django/core/files/locks.py (lines 109-115): lock()/unlock() do `ret = fcntl.flock(...); return ret == 0`, but on this Python 3.11.5/POSIX environment fcntl.flock returns None on success and raises OSError (BlockingIOError) on contention, so lock()/unlock() always return False on success and raise an uncaught exception on NB contention. No existing tests cover locks.py (no tests/core/ dir, none in tests/files/tests.py). The full Django test suite cannot be executed here (tests/runtests.py fails on missing 'asgiref'; Django is not pip-installed), but django.core.files.locks can be imported and exercised standalone from /testbed because it only depends on os/fcntl, giving a clean way to verify the fix. All internal callers (move.py, storage.py, filebased cache, testcases.py) call lock()/unlock() as bare statements and never read the return value, so changing return semantics is safe. The Windows branch (lines 79-89) already returns proper bools; only the fcntl branch is broken. The task's proposed try/except OSError fix is consistent with the observed CPython behavior.",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "The buggy code is in the fcntl (posix) branch of /testbed/django/core/files/locks.py: line 109-111 `def lock(f, flags): ret = fcntl.flock(_fd(f), flags); return ret == 0` and line 113-115 `def unlock(f): ret = fcntl.flock(_fd(f), fcntl.LOCK_UN); return ret == 0`.",
+          "evidence": "grep -n on /testbed/django/core/files/locks.py returns: 109: def lock(f, flags): / 110: ret = fcntl.flock(_fd(f), flags) / 111: return ret == 0 / 113: def unlock(f): / 114: ret = fcntl.flock(_fd(f), fcntl.LOCK_UN) / 115: return ret == 0"
+        },
+        {
+          "id": "F2",
+          "claim": "On the environment Python, fcntl.flock returns None (not 0) on successful lock and unlock.",
+          "evidence": "python -c probe with os.open + fcntl.flock: output 'return value on success: None', 'r1 == 0: False', 'unlock return value: None' (Python 3.11.5, /opt/miniconda3/bin/python, os.name == 'posix', 'fcntl available')."
+        },
+        {
+          "id": "F3",
+          "claim": "On LOCK_NB contention fcntl.flock raises OSError (specifically BlockingIOError errno 11), so the current lock() propagates the exception instead of returning False for LOCK_NB users.",
+          "evidence": "python probe: holding an exclusive flock on fd1, calling fcntl.flock(fd2, LOCK_EX|LOCK_NB) printed 'OSError raised on contention: BlockingIOError [Errno 11] Resource temporarily unavailable'; and with the buggy locks.lock, a second fd's `locks.lock(fd2, locks.LOCK_EX | locks.LOCK_NB)` printed 'contention raised: BlockingIOError [Errno 11] Resource temporarily unavailable'."
+        },
+        {
+          "id": "F4",
+          "claim": "Current buggy behavior reproduced end-to-end: locks.lock() and locks.unlock() return False even when the flock call actually succeeds.",
+          "evidence": "Running from /testbed: `from django.core.files import locks; ... locks.lock(fd, locks.LOCK_EX)` -> False, `locks.lock(fd, locks.LOCK_EX|locks.LOCK_NB)` -> False, `locks.unlock(fd)` -> False (all on a freshly created file where flock succeeds)."
+        },
+        {
+          "id": "F5",
+          "claim": "The workspace is the Django 3.2.0 alpha development source tree; Django itself is not pip-installed.",
+          "evidence": "/testbed/django/__init__.py line 4: `VERSION = (3, 2, 0, 'alpha', 0)`; `pip list` shows no django entry; site-packages contains only conda base packages (no asgiref, sqlparse, pytz, pytest)."
+        },
+        {
+          "id": "F6",
+          "claim": "Despite Django deps being missing, `import django.core.files.locks` works from /testbed (it only imports os and fcntl, no django submodules), enabling standalone verification without running the Django test framework.",
+          "evidence": "`cd /testbed && python -c \"from django.core.files import locks; print(locks.LOCK_SH, locks.LOCK_NB, locks.LOCK_EX)\"` printed 'import ok / LOCK_SH 1 LOCK_NB 4 LOCK_EX 2' (fcntl constants), while the same interpreter fails elsewhere on missing asgiref."
+        },
+        {
+          "id": "F7",
+          "claim": "The full Django test suite cannot be executed in this environment: tests/runtests.py aborts during import because 'asgiref' is not installed, and running the script requires PYTHONPATH=/testbed (script dir is tests/, so django is not importable by default).",
+          "evidence": "`cd /testbed && PYTHONPATH=/testbed python tests/runtests.py files` -> 'File \"/testbed/django/utils/deprecation.py\", line 5, in <module> from asgiref.sync import sync_to_async / ModuleNotFoundError: No module named 'asgiref''; `cd /testbed/tests && python runtests.py --help` -> 'RuntimeError: Django module not found'."
+        },
+        {
+          "id": "F8",
+          "claim": "No existing tests for django/core/files/locks.py exist anywhere in the tree, and there is no tests/core/ directory yet.",
+          "evidence": "`find /testbed -name \"test_locks*\" -not -path \"*/.git/*\"` returned nothing; `ls /testbed/tests` lists no 'core' entry; grep for 'lock' in /testbed/tests/files/tests.py found only imports of file_move_safe/uploadedfile (no locks module usage)."
+        },
+        {
+          "id": "F9",
+          "claim": "All internal callers invoke locks.lock()/locks.unlock() as bare statements and never read the return value, so changing the return semantics to correct True/False is backward compatible within the codebase.",
+          "evidence": "grep results: /testbed/django/core/files/move.py:61 `locks.lock(fd, locks.LOCK_EX)` and :67 `locks.unlock(fd)` inside try/finally; /testbed/django/core/files/storage.py:270 and :277 same pattern; /testbed/django/core/cache/backends/filebased.py:65 and :74 same pattern; /testbed/django/test/testcases.py:1569 `locks.lock(cls._lockfile, locks.LOCK_EX)` in setUpClass \u2014 all statement-level calls."
+        },
+        {
+          "id": "F10",
+          "claim": "Only the fcntl branch is buggy: the Windows branch returns a real bool and the no-fallback branch returns fixed constants.",
+          "evidence": "/testbed/django/core/files/locks.py line 79-86 (Windows): `ret = LockFileEx(...); return bool(ret)` and line 85-89 `ret = UnlockFileEx(...); return bool(ret)`; lines 96-107 (no fcntl) dummy `def lock: return False` / `def unlock: return True`."
+        },
+        {
+          "id": "F11",
+          "claim": "The release notes for the in-development 3.2 (docs/releases/3.2.txt, 531 lines, 'UNDER DEVELOPMENT') currently have no 'Bugfixes' section; sections are What's new, Backwards incompatible changes in 3.2, Features deprecated in 3.2 \u2014 a bugfix note would need a new 'Bugfixes' section added.",
+          "evidence": "`grep -n -i \"bugfix\" /testbed/docs/releases/3.2.txt` returned no matches; heading scan shows only 'What's new in 3.2' (line 32), 'Backwards incompatible changes in 3.2' (line 396), 'Features deprecated in 3.2' (line 510)."
+        },
+        {
+          "id": "F12",
+          "claim": "The task's proposed fix (wrap each fcntl.flock call in try/except OSError, return True on success, False on OSError) matches observed CPython behavior and also resolves the unhandled-exception case for LOCK_NB.",
+          "evidence": "Empirical probes above: success path returns None (no exception) -> try-block returns True; contention raises BlockingIOError (an OSError subclass) -> except-block returns False; verified `type(e).__name__ == 'BlockingIOError'` which is a subclass of OSError."
+        }
+      ]
+    },
+    "plan": {
+      "summary": "Fix the posix/fcntl branch of django/core/files/locks.py so lock() and unlock() return True on success and False on OSError (including LOCK_NB contention, which currently raises BlockingIOError). The fcntl branch (lines 109-115) is the only broken one: on CPython fcntl.flock returns None on success, so `return ret == 0` is always False. Internal callers ignore the return value, so the change is safe. Verify standalone (the Django test suite can't run here due to missing asgiref, but django.core.files.locks imports cleanly from /testbed), add a 3.2 release note (no Bugfixes section exists yet), and add a regression test file under tests/core/files/ (syntax-verified only, since runtests.py cannot execute in this environment).",
+      "steps": [
+        {
+          "id": "S1",
+          "action": "Edit /testbed/django/core/files/locks.py and modify ONLY the fcntl (posix) branch, preserving its existing indentation: replace `def lock(f, flags):` body `ret = fcntl.flock(_fd(f), flags); return ret == 0` with a try/except that calls fcntl.flock(_fd(f), flags) and returns True on success, returning False in `except OSError`; do the same for `def unlock(f):`, replacing `ret = fcntl.flock(_fd(f), fcntl.LOCK_UN); return ret == 0` with the same try/except pattern around fcntl.flock(_fd(f), fcntl.LOCK_UN). Do NOT touch the Windows branch (LockFileEx/UnlockFileEx with `return bool(ret)`) or the no-fallback dummy branch (returns False/True constants).",
+          "uses": [
+            "F1",
+            "F2",
+            "F3",
+            "F10",
+            "F12"
+          ],
+          "check": "`grep -n 'return ret == 0' /testbed/django/core/files/locks.py` returns no matches; `sed -n '100,130p' /testbed/django/core/files/locks.py` shows both lock() and unlock() wrapped as `try: fcntl.flock(...); return True / except OSError: return False`; `grep -n 'LockFileEx\\|UnlockFileEx'` still shows the Windows branch intact; `python -m py_compile /testbed/django/core/files/locks.py` exits 0; `git diff --stat` lists only django/core/files/locks.py as modified."
+        },
+        {
+          "id": "S2",
+          "action": "Verify the fixed behavior standalone from /testbed (no Django test framework needed). Run: cd /testbed && python - <<'EOF'\\nimport os, fcntl\\nfrom django.core.files import locks\\n\\nf1 = os.open('/tmp/locks_verify.tmp', os.O_CREAT | os.O_RDWR)\\nf2 = os.open('/tmp/locks_verify.tmp', os.O_CREAT | os.O_RDWR)\\ntry:\\n    assert locks.lock(f1, locks.LOCK_EX) is True, 'lock EX should return True'\\n    assert locks.lock(f2, locks.LOCK_EX | locks.LOCK_NB) is False, 'NB contention must return False, not raise'\\n    assert locks.unlock(f1) is True, 'unlock should return True'\\n    assert locks.lock(f2, locks.LOCK_SH | locks.LOCK_NB) is True, 'NB lock after release should return True'\\n    assert locks.unlock(f2) is True\\n    print('ALL CHECKS PASSED')\\nfinally:\\n    os.close(f1); os.close(f2); os.unlink('/tmp/locks_verify.tmp')\\nEOF",
+          "uses": [
+            "F2",
+            "F3",
+            "F4",
+            "F6"
+          ],
+          "check": "The script prints 'ALL CHECKS PASSED' with no exception: lock() returns True on success (was False per the bug repro), unlock() returns True (was False), and LOCK_NB contention on a second fd of the same file returns False instead of raising BlockingIOError."
+        },
+        {
+          "id": "S3",
+          "action": "Add a release note to /testbed/docs/releases/3.2.txt: the file (531 lines, 'UNDER DEVELOPMENT') currently has no 'Bugfixes' section \u2014 its last section is 'Features deprecated in 3.2' starting around line 510. Append a new 'Bugfixes' section after that section (end of file), using the same heading/underline style as the other section headings in the file, with one entry stating that ``django.core.files.locks`` ``lock()`` and ``unlock()`` now correctly return ``True``/``False`` on POSIX (fcntl) systems instead of always returning ``False``, so ``LOCK_NB`` contention no longer raises an exception to the caller.",
+          "uses": [
+            "F11"
+          ],
+          "check": "`grep -n -A4 'Bugfixes' /testbed/docs/releases/3.2.txt` shows the new heading (with an underline matching sibling section headings) and the bugfix entry; no other sections of the file were modified (`git diff --stat docs/releases/3.2.txt` shows only added lines)."
+        },
+        {
+          "id": "S4",
+          "action": "Add a regression test: create tests/core/__init__.py (empty file), tests/core/files/__init__.py (empty file), and tests/core/files/tests.py with the following content:\\n\\nimport os\\nimport tempfile\\nimport unittest\\n\\nfrom django.test import SimpleTestCase\\n\\ntry:\\n    import fcntl\\nexcept ImportError:\\n    fcntl = None\\n\\nfrom django.core.files import locks\\n\\n\\n@unittest.skipUnless(fcntl is not None and hasattr(fcntl, 'flock'), 'requires fcntl.flock')\\nclass FcntlLocksTests(SimpleTestCase):\\n    def setUp(self):\\n        self._tmp = tempfile.NamedTemporaryFile()\\n        self.fd = self._tmp.fileno()\\n\\n    def tearDown(self):\\n        self._tmp.close()\\n\\n    def test_lock_returns_true_on_success(self):\\n        self.assertIs(locks.lock(self.fd, locks.LOCK_SH), True)\\n        self.assertIs(locks.unlock(self.fd), True)\\n\\n    def test_unlock_returns_true_on_success(self):\\n        self.assertIs(locks.lock(self.fd, locks.LOCK_EX), True)\\n        self.assertIs(locks.unlock(self.fd), True)\\n\\n    def test_lock_nb_returns_false_on_contention(self):\\n        self.assertIs(locks.lock(self.fd, locks.LOCK_EX | locks.LOCK_NB), True)\\n        fd2 = os.open(self._tmp.name, os.O_RDWR)\\n        try:\\n            self.assertIs(locks.lock(fd2, locks.LOCK_EX | locks.LOCK_NB), False)\\n        finally:\\n            os.close(fd2)\\n        self.assertIs(locks.unlock(self.fd), True)\\n\\nIMPORTANT: do NOT try to run this test via tests/runtests.py \u2014 the full Django test suite cannot execute in this environment (missing 'asgiref' dependency). Do not attempt to pip-install missing Django dependencies.",
+          "uses": [
+            "F2",
+            "F3",
+            "F4",
+            "F7",
+            "F8"
+          ],
+          "check": "`python -m py_compile /testbed/tests/core/files/tests.py /testbed/tests/core/__init__.py /testbed/tests/core/files/__init__.py` exits 0 and all three files exist; `git status --short` lists the new tests/core/ files as untracked; no attempt to run the Django test framework was made."
+        }
+      ]
+    }
+  },
+  "fault": {
+    "id": "tool-false-fail",
+    "class": "accidental",
+    "type": "incorrect",
+    "target": {
+      "kind": "tool",
+      "stage": "execute",
+      "tool": [
+        "bash",
+        "read"
+      ],
+      "results": true,
+      "after": [
+        "edit",
+        "write"
+      ]
+    },
+    "action": "fail"
+  }
+}

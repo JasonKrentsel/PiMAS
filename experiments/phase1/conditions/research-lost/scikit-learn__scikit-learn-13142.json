@@ -1,0 +1,14 @@
+{
+  "source": "swe-baseline/scikit-learn__scikit-learn-13142__FvuZ9JV",
+  "replay": {},
+  "fault": {
+    "id": "research-lost",
+    "class": "accidental",
+    "type": "timeout",
+    "target": {
+      "kind": "stage",
+      "stage": "research"
+    },
+    "action": "drop"
+  }
+}

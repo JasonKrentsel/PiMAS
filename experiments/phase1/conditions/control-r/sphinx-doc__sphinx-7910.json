@@ -1,0 +1,71 @@
+{
+  "source": "swe-baseline/sphinx-doc__sphinx-7910__Wh6CstG",
+  "replay": {
+    "research": {
+      "summary": "The bug is in sphinx's napoleon extension, function _skip_member (sphinx/ext/napoleon/__init__.py:381-460), hooked to the autodoc-skip-member event (line 305). For a documented class member it decides whether the class \"owns\" the member by looking up the owner class from the member's __qualname__; for a top-level class name (no dots in the prefix) it does cls = obj.__globals__[cls_path] (line 441). For a method wrapped by a decorator (e.g. functools.wraps) the wrapper's __globals__ is the globals of the module where the wrapper was defined (the decorator's module, or functools), which does not contain the class name, so a KeyError is swallowed by the except Exception (line 442) and cls_is_owner stays False; the function then returns None, and autodoc falls back to its default decision (skip special members), so the decorated __init__ is never documented even with napoleon_include_init_with_doc=True. Reproduced both at unit level (via the testbed conda env's python with a decorator in a separate module: _skip_member returns None for the decorated __init__ but False for a plain one) and end-to-end (minimal Sphinx project: with napoleon_include_init_with_doc=True and no explicit :special-members: option, the plain class's init docstring appears in the text output but the decorated class's does not). A fix that unifies both lookup branches by resolving the owner class via importlib.import_module(obj.__module__) + functools.reduce(getattr, cls_path.split('.'), mod) (removing the __globals__ shortcut) was verified in-memory: the e2e build then documents both __init__ docstrings, and all 16 existing tests in tests/test_ext_napoleon.py still pass (63 pass across the three napoleon test files on baseline). The fix also preserves the py3.7+ namedtuple behavior (test_namedtuple expects skip/None; verified on py3.9 that namedtuple(...)._asdict has __qualname__='T._asdict' and __module__='collections', so the unified lookup raises AttributeError and is caught -> cls_is_owner=False). Test env: conda env 'testbed' (/opt/miniconda3/envs/testbed/bin/python, Python 3.9.20), sphinx 3.2.0 imported from /testbed/sphinx, docutils 0.21.2, pytest 8.3.3; run tests with that python -m pytest. Note: tests/test_ext_autodoc.py::test_autodoc has a pre-existing baseline failure caused by a docutils 0.21 'meta' node double-registration warning from sphinx.addnodes \u2014 unrelated to this bug.",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "The workspace is a Sphinx 3.2.0 development checkout at /testbed (git HEAD 64b443a58 'SWE-bench'), and the working Python for tests is the conda env 'testbed' at /opt/miniconda3/envs/testbed/bin/python (Python 3.9.20) with sphinx 3.2.0 imported from /testbed/sphinx, docutils 0.21.2, and pytest 8.3.3; the default miniconda python (3.11.5) lacks docutils.",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/python -c \"import sphinx, docutils, pytest; print(sphinx.__version__, sphinx.__file__); print(docutils.__version__); print(pytest.__version__)\" -> '3.2.0 /testbed/sphinx/__init__.py 0.21.2 8.3.3'; `python -c \"import docutils\"` in base env -> ModuleNotFoundError"
+        },
+        {
+          "id": "F2",
+          "claim": "The buggy code is in _skip_member in sphinx/ext/napoleon/__init__.py (function spans lines 381-460); for class/exception members it resolves the owner class from __qualname__ and, when the class name has no dots (top-level class), uses `cls = obj.__globals__[cls_path]` at line 441, wrapping the lookup in a bare `except Exception: cls_is_owner = False` (lines 442-443); the final inclusion decision uses `if what == 'module' or cls_is_owner:` at line 450.",
+          "evidence": "grep -n 'cls_is_owner' sphinx/ext/napoleon/__init__.py -> lines 427,443,445,448,450; grep -n '__globals__\\[' sphinx -> 'sphinx/ext/napoleon/__init__.py:441: cls = obj.__globals__[cls_path]'; read of lines 427-452 confirms structure"
+        },
+        {
+          "id": "F3",
+          "claim": "_skip_member is connected to the 'autodoc-skip-member' event in napoleon's setup() (sphinx/ext/napoleon/__init__.py:305), and autodoc emits that event with self.objtype (e.g. 'class') at sphinx/ext/autodoc/__init__.py:665; if the handler returns None autodoc keeps its own default skip decision (a non-None result overrides it via `keep = not skip_user` at lines 666-668).",
+          "evidence": "grep 'autodoc-skip-member' sphinx -> napoleon/__init__.py:305 `app.connect('autodoc-skip-member', _skip_member)` and autodoc/__init__.py:665 `skip_user = self.env.app.emit_firstresult('autodoc-skip-member', self.objtype, membername, member, not keep, self.options)`; autodoc lines 666-668: `if skip_user is not None: keep = not skip_user`"
+        },
+        {
+          "id": "F4",
+          "claim": "Root cause: a functools.wraps-decorated method keeps the wrapped function's __module__ and __qualname__ (so qualname is e.g. 'Foo.__init__'), but its __globals__ belongs to the module where the wrapper was defined (the decorator's module, or functools itself), which does not contain the class name; therefore `obj.__globals__[cls_path]` raises KeyError, is swallowed, and cls_is_owner stays False, so _skip_member returns None instead of False.",
+          "evidence": "Repro in /tmp/repro (decorator in mydeco.py, class in main_mod.py): output 'module= main_mod | qualname= 'Foo.__init__'', '__globals__ has class name? False', '_skip_member result ...: None'"
+        },
+        {
+          "id": "F5",
+          "claim": "Unit-level bug reproduction: with napoleon_include_init_with_doc=True, _skip_member(app, 'class', '__init__', <decorated __init__>, True, options) returns None (=> member skipped by autodoc default) while for a plain undecorated __init__ it returns False (=> documented).",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/python repro over Foo (decorated via external module) and Bar (plain) classes: 'decorated ... _skip_member result: None', 'plain ... _skip_member result: False'"
+        },
+        {
+          "id": "F6",
+          "claim": "End-to-end bug confirmation: a minimal Sphinx 3.2.0 project (automodule with :members:, conf.py setting napoleon_include_init_with_doc=True, no explicit :special-members: option) documents the plain class's __init__ docstring but NOT the decorated class's in the text output; adding :special-members: __init__ hides the bug because the default keep decision is then True regardless of the handler.",
+          "evidence": "In /tmp/e2e build with `python -m sphinx -b text`: `grep -c \"Init doc of\" out/index.txt` -> 1, and only 'Init doc of PlainClass.' present; with the :special-members: __init__ variant, grep -c -> 2 (both present)"
+        },
+        {
+          "id": "F7",
+          "claim": "Verified fix approach: unify the two owner-class lookup branches so the class is always resolved via importlib.import_module(obj.__module__) + functools.reduce(getattr, cls_path.split('.'), mod) (i.e., drop the `obj.__globals__[cls_path]` shortcut); with this logic the e2e build documents both __init__ docstrings and the unit repro returns False for the decorated __init__.",
+          "evidence": "/tmp/e2e with a patched handler (fixed_skip_member connected at priority -1 in conf.py): `grep -c \"Init doc of\" out2/index.txt` -> 2 with both 'Init doc of DecoClass.' and 'Init doc of PlainClass.'; /tmp/repro logic check: 'cls_is_owner would be: True'"
+        },
+        {
+          "id": "F8",
+          "claim": "The fix does not break existing tests: all 16 tests in tests/test_ext_napoleon.py pass with the fixed _skip_member applied in-memory (pytest plugin patching sphinx.ext.napoleon._skip_member before test-module import), and the three napoleon test files pass 63/63 on the unmodified baseline.",
+          "evidence": "Baseline: `pytest tests/test_ext_napoleon.py tests/test_ext_napoleon_docstring.py tests/test_ext_napoleon_iterators.py -q` -> '63 passed'; with in-memory fix: `PYTHONPATH=/tmp pytest -p fixplugin tests/test_ext_napoleon.py -q` -> '16 passed'"
+        },
+        {
+          "id": "F9",
+          "claim": "The fix preserves the py3.7+ namedtuple expectation of the existing test_namedtuple (which asserts the member is skipped, i.e. _skip_member returns None, and no exception): on Python 3.9, namedtuple('T','a b')._asdict has __qualname__ == 'T._asdict' and __module__ == 'collections', so the unified import/getattr lookup raises AttributeError ('T' not in collections), is caught, and cls_is_owner stays False.",
+          "evidence": "python3.9 output: \"namedtuple._asdict qualname: 'T._asdict' | module: collections\"; tests/test_ext_napoleon.py test_namedtuple (py>=3.7 branch) asserts expect_default_skip=True"
+        },
+        {
+          "id": "F10",
+          "claim": "tests/test_ext_napoleon.py's SkipMemberTest provides the assertSkip(what, member, obj, expect_default_skip, config_name) helper (mock app + Config with the relevant napoleon config flag set True/False) and sample fixtures SampleClass/SampleError/module-level functions; a regression test for a decorated __init__ would naturally be added here (decorator must come from a different module than the class to trigger the __globals__ failure).",
+          "evidence": "read of tests/test_ext_napoleon.py: assertSkip helper at lines ~152-165, SampleClass at ~43, SampleError at ~60, SkipMemberTest class at ~147"
+        },
+        {
+          "id": "F11",
+          "claim": "Pre-existing, unrelated test failure on baseline: tests/test_ext_autodoc.py::test_autodoc fails because a docutils 0.21 warning ('while setting up extension sphinx.addnodes: node class 'meta' is already registered') pollutes an empty-warnings assertion; this is an environment artifact and not caused by (and not expected to be fixed by) the napoleon change.",
+          "evidence": "Baseline `pytest tests/test_ext_autodoc.py -q` -> '1 failed, 59 passed'; failure message: 'AssertionError: assert '\\x1b[91mWARN...b[39;49;00m\\n' == ''' with the addnodes 'meta' node warning"
+        },
+        {
+          "id": "F12",
+          "claim": "Config default: napoleon_include_init_with_doc defaults to False (sphinx/ext/napoleon/__init__.py:255, registered with 'env' rebuild), so the bug only manifests when the user opts in, as in the tensorpack report.",
+          "evidence": "sphinx/ext/napoleon/__init__.py line 255: \"'napoleon_include_init_with_doc': (False, 'env'),\""
+        }
+      ]
+    }
+  },
+  "fault": null
+}

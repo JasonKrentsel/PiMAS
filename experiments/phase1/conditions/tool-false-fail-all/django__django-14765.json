@@ -1,0 +1,139 @@
+{
+  "source": "swe-baseline/django__django-14765__iQuHtuE",
+  "replay": {
+    "research": {
+      "summary": "The task is to simplify ProjectState.__init__() in /testbed/django/db/migrations/state.py (lines 91-97): PR #14760 (commit 54a30a7a00, \"Refs #29898 -- Changed ProjectState.real_apps to set.\") already changed every internal call site to pass real_apps as a set (or None) and left a defensive `isinstance(real_apps, set) else set(real_apps)` conversion in __init__. I verified exhaustively that every ProjectState(...) construction in django/ and tests/ passes either a set literal, loader.unmigrated_apps (always a set), clone()'s self.real_apps (always a set after __init__), or None \u2014 no call site passes a non-set, and no test exercises the non-set conversion branch. The change is to replace the conversion with `assert isinstance(real_apps, set)` when non-None (e.g. `if real_apps is not None: assert isinstance(real_apps, set)`; `self.real_apps = real_apps or set()`), which matches upstream Django 4.0's final code. Tests must be run with the conda env at /opt/miniconda3/envs/testbed/bin/python (Python 3.8.20, Django editable from /testbed); the base miniconda python (3.11.5) lacks django deps. Baseline `migrations.test_state` passes (64 tests OK). The dev release notes are docs/releases/4.0.txt whose Migrations section currently holds only a \"* ...\" placeholder, a likely spot for a release-note entry.",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "Current ProjectState.__init__ at /testbed/django/db/migrations/state.py:91-97 is: `def __init__(self, models=None, real_apps=None): self.models = models or {}` then `if real_apps: self.real_apps = real_apps if isinstance(real_apps, set) else set(real_apps)` / `else: self.real_apps = set()`, followed by `self.is_delayed = False` and `self.relations = None`.",
+          "evidence": "read of /testbed/django/db/migrations/state.py lines 91-99 shows exactly: line 91 `def __init__(self, models=None, real_apps=None):`, line 94 `if real_apps:`, line 95 `self.real_apps = real_apps if isinstance(real_apps, set) else set(real_apps)`, line 97 `self.real_apps = set()`"
+        },
+        {
+          "id": "F2",
+          "claim": "The defensive conversion was introduced by commit 54a30a7a00 'Refs #29898 -- Changed ProjectState.real_apps to set.' (the PR #14760 work) which simultaneously changed all call sites to pass sets: executor.py `ProjectState(real_apps=self.loader.unmigrated_apps)` (was list(...)), loader.py `make_state(..., real_apps=self.unmigrated_apps)` (was list(...)), and test literals changed from lists to sets.",
+          "evidence": "`git show 54a30a7a00` shows diff hunks: executor.py `-state = ProjectState(real_apps=list(self.loader.unmigrated_apps))` `+state = ProjectState(real_apps=self.loader.unmigrated_apps)`; loader.py `-real_apps=list(self.unmigrated_apps)` `+real_apps=self.unmigrated_apps`; state.py `+if real_apps:` `+self.real_apps = real_apps if isinstance(real_apps, set) else set(real_apps)`; tests auth_tests/test_management.py, test_state.py `['contenttypes']` -> `{'contenttypes'}`, test_autodetector.py `[\"migrations\"]` -> `{'migrations'}`"
+        },
+        {
+          "id": "F3",
+          "claim": "Every ProjectState(...) construction in the Django source tree passes real_apps as a set or None: executor.py:69 passes self.loader.unmigrated_apps; graph.py:313 passes the make_state(real_apps=None) parameter whose only internal caller loader.py:338 passes self.unmigrated_apps; state.py:412 clone() passes self.real_apps (guaranteed a set by __init__); from_apps (state.py:428-434) calls cls(app_models) with no real_apps.",
+          "evidence": "`grep -rn 'real_apps=' django/` returns only: loader.py:338, executor.py:69, graph.py:300 (make_state signature `real_apps=None`), graph.py:313, state.py:91 (def), state.py:412; read of state.py:428-434 shows `return cls(app_models)` with no real_apps argument"
+        },
+        {
+          "id": "F4",
+          "claim": "MigrationLoader.unmigrated_apps is always a set: it is initialized to set() and only .add()'d to, never reassigned to another type.",
+          "evidence": "/testbed/django/db/migrations/loader.py:71 `self.unmigrated_apps = set()` inside load_disk(); all other occurrences (lines 77, 87, 93, 102) are `self.unmigrated_apps.add(app_config.label)`; line 169 and 338 are reads"
+        },
+        {
+          "id": "F5",
+          "claim": "No test or source call site passes a non-set to ProjectState(real_apps=...): the only two test constructions with real_apps use set literals (tests/auth_tests/test_management.py:1134 and tests/migrations/test_state.py:919, both `real_apps={'contenttypes'}`); all other ~90 ProjectState() calls omit real_apps; test_autodetector.py:2415/2434 assign `after.real_apps = {'migrations'}` directly (attribute assignment, not via __init__).",
+          "evidence": "`grep 'ProjectState\\(' *.py` and `grep 'real_apps' tests/` results: real_apps values seen are only `{'contenttypes'}` (2 sites), `{'migrations'}` (2 direct attribute assignments), or absent"
+        },
+        {
+          "id": "F6",
+          "claim": "The existing test test_real_apps (tests/migrations/test_state.py:898-924) only verifies that including a real app resolves dangling FKs using a set literal; no existing test exercises converting a non-set (e.g. list) real_apps, so removing the conversion will not break existing tests but passing a list will now raise AssertionError under `python -O`-free runs.",
+          "evidence": "read of /testbed/tests/migrations/test_state.py lines 898-924: test_real_apps uses `ProjectState(real_apps={'contenttypes'})` and asserts model count; grep shows no other non-set real_apps usage"
+        },
+        {
+          "id": "F7",
+          "claim": "Tests must be run with /opt/miniconda3/envs/testbed/bin/python (Python 3.8.20; pip list shows `Django 4.0.dev20210819072031 /testbed` editable install, asgiref 3.8.1, pytz, etc.); the default /opt/miniconda3/bin/python is 3.11.5 and lacks django/asgiref (runtests.py fails with ModuleNotFoundError: No module named 'django' then 'asgiref').",
+          "evidence": "commands: `/opt/miniconda3/envs/testbed/bin/python --version` -> 'Python 3.8.20'; its `pip list` shows 'Django 4.0.dev20210819072031 /testbed' and 'asgiref 3.8.1'; `python tests/runtests.py ...` with base python -> 'ModuleNotFoundError: No module named \"django\"'; with PYTHONPATH=/testbed base python -> 'ModuleNotFoundError: No module named asgiref'"
+        },
+        {
+          "id": "F8",
+          "claim": "Baseline test run passes: `cd /testbed && /opt/miniconda3/envs/testbed/bin/python tests/runtests.py migrations.test_state --parallel=1` -> 'Ran ... Found 64 test(s) ... OK'; single test `migrations.test_state.StateTests.test_real_apps` -> 'Ran 1 test in 0.002s OK'.",
+          "evidence": "observed command output: 'OK / Testing against Django installed in /testbed/django / Found 64 test(s). / System check identified no issues (0 silenced).' and the single-test run output 'Ran 1 test in 0.002s OK'"
+        },
+        {
+          "id": "F9",
+          "claim": "The project is Django 4.0 dev: django.get_version() -> '4.0.dev20260813012819'; the in-development release notes file is docs/releases/4.0.txt ('Django 4.0 release notes - UNDER DEVELOPMENT') whose Migrations section (line 277) currently contains only the placeholder bullet '* ...' (lines 278-280); no mention of real_apps or ProjectState exists anywhere in docs/releases, so a release-note entry for this change would be added under Migrations in 4.0.txt.",
+          "evidence": "`python -c \"import django; print(django.get_version())\"` -> '4.0.dev20260813012819'; `grep -n ... docs/releases/4.0.txt` shows '1:Django 4.0 release notes - UNDER DEVELOPMENT', '277:Migrations'; sed of the Migrations section shows only '* ...' placeholder; `grep 'real_apps|ProjectState' docs/releases` -> 'No matches found'"
+        },
+        {
+          "id": "F10",
+          "claim": "The workspace is a clean git checkout at commit ba184e0a72 ('SWE-bench', empty setup commit) on branch main with clean working tree; the upstream fix for this task in Django 4.0 final released __init__ as: `if real_apps is not None: assert isinstance(real_apps, set)` then `self.real_apps = real_apps or set()` (from knowledge of released Django 4.0 source, not from this workspace).",
+          "evidence": "`git log --oneline -10` shows 'ba184e0a72 SWE-bench' as HEAD and `git status` -> 'On branch main, nothing to commit, working tree clean'; `git show ba184e0a72 --stat` shows no file changes; the 4.0-final code form is prior knowledge and is marked as such"
+        }
+      ]
+    },
+    "plan": {
+      "summary": "Simplify ProjectState.__init__ in django/db/migrations/state.py: since PR #14760 made every internal call site pass real_apps as a set (or None), replace the defensive isinstance/set conversion with `if real_apps is not None: assert isinstance(real_apps, set)` plus `self.real_apps = real_apps or set()`. All call sites were verified set-or-None (F2-F5), no test exercises the old conversion branch (F6), baseline tests pass (F8), and the env python is pinned (F7). Verify via a functional sanity check, the migrations.test_state suite, and an optional broader regression run.",
+      "steps": [
+        {
+          "id": "S1",
+          "action": "Edit /testbed/django/db/migrations/state.py. In ProjectState.__init__ (def at line 91), replace exactly these 4 lines:\n        if real_apps:\n            self.real_apps = real_apps if isinstance(real_apps, set) else set(real_apps)\n        else:\n            self.real_apps = set()\nwith these 3 lines (keeping 8-space method-body indentation):\n        if real_apps is not None:\n            assert isinstance(real_apps, set)\n        self.real_apps = real_apps or set()\nDo not touch the def line, `self.models = models or {}`, `self.is_delayed = False`, or `self.relations = None`. This is safe because every ProjectState(...) call site in django/ and tests/ passes a set literal, loader.unmigrated_apps (always a set), clone()'s self.real_apps (a set), or None.",
+          "uses": [
+            "F1",
+            "F2",
+            "F3",
+            "F4",
+            "F10"
+          ],
+          "check": "Run `sed -n '88,100p' /testbed/django/db/migrations/state.py` and confirm __init__ now contains `if real_apps is not None:`, `assert isinstance(real_apps, set)`, and `self.real_apps = real_apps or set()`, with no remaining `set(real_apps)` conversion; `git -C /testbed diff` shows only django/db/migrations/state.py modified (a 3-line replacement for 4)."
+        },
+        {
+          "id": "S2",
+          "action": "Functional sanity check with the testbed env (do NOT use /opt/miniconda3/bin/python, which lacks the Django deps). Write /tmp/check_real_apps.py containing:\nfrom django.db.migrations.state import ProjectState\nassert ProjectState().real_apps == set()\nassert ProjectState(real_apps={'a', 'b'}).real_apps == {'a', 'b'}\ntry:\n    ProjectState(real_apps=['a'])\n    raise SystemExit('FAIL: list accepted, expected AssertionError')\nexcept AssertionError:\n    pass\nprint('OK')\nthen run: /opt/miniconda3/envs/testbed/bin/python /tmp/check_real_apps.py",
+          "uses": [
+            "F7",
+            "F10"
+          ],
+          "check": "The command exits 0 and prints 'OK', confirming: default real_apps is an empty set, a set is passed through unchanged, and a list now raises AssertionError (assert is active in this non-optimized interpreter)."
+        },
+        {
+          "id": "S3",
+          "action": "Run the core test module for the changed code: cd /testbed && /opt/miniconda3/envs/testbed/bin/python tests/runtests.py migrations.test_state --parallel=1 . Then also run the real_apps-specific test directly: cd /testbed && /opt/miniconda3/envs/testbed/bin/python tests/runtests.py migrations.test_state.StateTests.test_real_apps --parallel=1",
+          "uses": [
+            "F5",
+            "F6",
+            "F7",
+            "F8"
+          ],
+          "check": "The module run reports the same result as the pre-change baseline: 64 tests found, 'Ran 64 tests ... OK' with no failures/errors. The individual StateTests.test_real_apps run reports 'Ran 1 test ... OK'."
+        },
+        {
+          "id": "S4",
+          "action": "Optional broader regression over the remaining real_apps call sites not covered by migrations.test_state: the MigrationExecutor/loader paths (django/db/migrations/executor.py:69, loader.py:338, exercised by tests/migrations/test_base.py) and the other test construction tests/auth_tests/test_management.py:1134. Run: cd /testbed && /opt/miniconda3/envs/testbed/bin/python tests/runtests.py migrations.test_base auth_tests.test_management --parallel=1",
+          "uses": [
+            "F3",
+            "F5",
+            "F7"
+          ],
+          "check": "The run finishes with 'OK' and zero failures/errors, confirming the assert does not fire on any production-path or test construction of ProjectState."
+        },
+        {
+          "id": "S5",
+          "action": "Optional (only if a release-note entry is wanted): in /testbed/docs/releases/4.0.txt, under the 'Migrations' section (around line 277, which currently holds only the placeholder bullet '* ...'), replace that placeholder with a single bullet such as: * ``ProjectState.__init__()`` now asserts that its ``real_apps`` argument is a ``set`` when it is not ``None``; non-set values are no longer silently converted. This change targets Django's internal API and no test requires it, so skip the step entirely if no docs change is desired.",
+          "uses": [
+            "F9"
+          ],
+          "check": "`grep -n 'real_apps' /testbed/docs/releases/4.0.txt` shows the new bullet inside the Migrations section, and `git -C /testbed diff --stat docs/` shows only docs/releases/4.0.txt modified; or, if skipped, `git -C /testbed status` shows no changes under docs/."
+        }
+      ]
+    }
+  },
+  "fault": {
+    "id": "tool-false-fail-all",
+    "class": "accidental",
+    "type": "incorrect",
+    "target": {
+      "kind": "tool",
+      "stage": [
+        "execute",
+        "review",
+        "correct"
+      ],
+      "tool": [
+        "bash",
+        "read"
+      ],
+      "results": true,
+      "after": [
+        "edit",
+        "write"
+      ],
+      "persistent": true
+    },
+    "action": "fail"
+  }
+}

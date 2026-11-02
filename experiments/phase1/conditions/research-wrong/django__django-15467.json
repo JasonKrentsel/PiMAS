@@ -1,0 +1,135 @@
+{
+  "source": "swe-baseline/django__django-15467__2oNuakK",
+  "replay": {
+    "research": {
+      "summary": "The workspace is the Django source tree itself (4.1.0.dev, base commit from 2022-02-26, top commit 8c88abd860 \"SWE-bench\", clean tree), not a Django app. The ticket's bug is real and located at django/contrib/admin/options.py:272 inside ModelAdmin.formfield_for_foreignkey: when a ForeignKey is in radio_fields and is blank, `kwargs[\"empty_label\"] = _(\"None\") if db_field.blank else None` unconditionally clobbers any `empty_label` a user's formfield_for_foreignkey override passed in. I reproduced the bug in-process (custom label lost, replaced by localized \"None\") and verified a behavior matrix for the ticket's proposed fix (`(kwargs.get(\"empty_label\") or _(\"None\")) if db_field.blank else None`) vs the `kwargs.get(\"empty_label\", _(\"None\"))` variant: both fix the reported case and keep non-blank behavior (empty_label=None) identical; only the explicit-`empty_label=None`-on-blank-field edge differs. The repo enforces 88-char Black lines, so the fix line must be wrapped (verified `black --check`-clean 3-line form). Tests run with the conda env interpreter `/opt/miniconda3/envs/testbed/bin/python` (Py3.9, Django installed editable from /testbed) via `python tests/runtests.py <label>`; the existing admin_widgets suite (86 tests) and admin_widgets.tests.AdminFormfieldForDBFieldTests (24 tests) are green at baseline, including test_radio_fields_ForeignKey which asserts empty_label is None for a non-blank radio FK and is unaffected by the fix. The only blank FK in tests/admin_widgets/models.py is Inventory.parent; the analogous choice-field path (options.py:217-231) already guards user overrides via `if \"choices\" not in kwargs` and needs no change. The single-line fix at options.py:272 is the only source change required.",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "The workspace is a Django source-tree checkout (not a Django app): /testbed contains django/, tests/, docs/; git branch main, top commit 8c88abd860 'SWE-bench', working tree clean; django/__init__.py declares VERSION = (4, 1, 0, \"alpha\", 0).",
+          "evidence": "ls /testbed shows django/, tests/, docs/, setup.py; `git -C /testbed log -1` -> '8c88abd860 SWE-bench', `git status` -> 'On branch main / nothing to commit, working tree clean'; django/__init__.py line 4: VERSION = (4, 1, 0, \"alpha\", 0)"
+        },
+        {
+          "id": "F2",
+          "claim": "The buggy line is django/contrib/admin/options.py:272, inside ModelAdmin.formfield_for_foreignkey (method def at line 246; the `elif db_field.name in self.radio_fields:` branch at lines 266-272): `kwargs[\"empty_label\"] = _(\"None\") if db_field.blank else None`, which overwrites any user-supplied kwargs['empty_label'] for blank FKs in radio_fields. `_` is `gettext` imported at line 65.",
+          "evidence": "grep -n \"empty_label\" django/contrib/admin/options.py -> '272:                kwargs[\"empty_label\"] = _(\"None\") if db_field.blank else None'; read of options.py lines 246-280 shows the method and branch; line 65: from django.utils.translation import gettext as _"
+        },
+        {
+          "id": "F3",
+          "claim": "The bug is reproducible: with a ModelAdmin whose radio_fields include a blank ForeignKey and whose formfield_for_foreignkey override sets kwargs['empty_label'] = 'MY CUSTOM LABEL', the returned form field's empty_label is the localized 'None' instead of the custom label; without the override it is also 'None'.",
+          "evidence": "Ran a script with /opt/miniconda3/envs/testbed/bin/python using settings.configure() and a blank FK to auth.User with radio_fields={'fk': admin.VERTICAL}: printed \"default empty_label: 'None'\" and \"custom empty_label:  'None'\" (custom label lost)."
+        },
+        {
+          "id": "F4",
+          "claim": "At the forms level there is no clobbering: ModelChoiceField.__init__ (django/forms/models.py:1439-1470) takes empty_label='---------' by default and, unless (required and initial is not None) or (widget is a RadioSelect subclass and not blank), sets self.empty_label to the passed value; the empty choice is emitted only when field.empty_label is not None (ModelChoiceIterator, models.py:1401-1402); docs/ref/forms/fields.txt:1240-1256 documents that empty_label=None suppresses the empty choice. So a custom empty_label string reaches the form field intact for a blank radio FK \u2014 only the admin code at options.py:272 discards it.",
+          "evidence": "read of django/forms/models.py lines 1439-1470 (the RadioSelect/not-blank branch sets self.empty_label = None, else self.empty_label = empty_label); models.py lines 1401-1402 `if self.field.empty_label is not None: yield (\"\", self.field.empty_label)`; docs/ref/forms/fields.txt lines 1240-1256"
+        },
+        {
+          "id": "F5",
+          "claim": "Verified in-process behavior matrix for a radio FK (AdminRadioSelect widget) under three versions of the line: current line 272 -> blank+custom='None' (bug), blank+explicit-None='None', non-blank (any input)=None. Ticket's proposed fix `(kwargs.get(\"empty_label\") or _(\"None\")) if db_field.blank else None` -> blank+custom='CUSTOM', blank+explicit-None='None' (still clobbered), non-blank=None. Alternative `kwargs.get(\"empty_label\", _(\"None\")) if db_field.blank else None` -> blank+custom='CUSTOM', blank+explicit-None=None (respected), non-blank=None. Both fix the reported bug; only the explicit-None edge case differs.",
+          "evidence": "Ran simulation script in /opt/miniconda3/envs/testbed/bin/python printing: 'current blank=True | label=...-> None | label=CUSTOM -> 'None' | label=None -> 'None'' ... 'fixA(ticket) blank=True | ... label=CUSTOM -> 'CUSTOM' | label=None -> 'None'' ... 'fixB(get default) blank=True | ... label=CUSTOM -> 'CUSTOM' | label=None -> None'; non-blank rows all None for all three variants"
+        },
+        {
+          "id": "F6",
+          "claim": "The repo enforces 88-character lines via Black (recent commit 7119f40c98 'Refs #33476 -- Refactored code to strictly match 88 characters line length.'); the one-line ticket-proposed fix at 16-space indent exceeds 88 chars and fails `black --check`, but the wrapped form passes: `kwargs[\"empty_label\"] = (\\n    (kwargs.get(\"empty_label\") or _(\"None\")) if db_field.blank else None\\n)`.",
+          "evidence": "git log --oneline -- django/contrib/admin/options.py shows 7119f40c98; piped candidate code to /opt/miniconda3/envs/testbed/bin/black -q --check - -> single-line version exit=1, black's reformatted 3-line version exit=0"
+        },
+        {
+          "id": "F7",
+          "claim": "Test environment: the working interpreter is /opt/miniconda3/envs/testbed/bin/python (Python 3.9.20) with asgiref 3.8.1, sqlparse 0.5.1, selenium 4.25.0 and 'Django 4.1.dev20220226170756' installed editable from /testbed; the default `python` on PATH (miniconda base, Python 3.11.5) lacks asgiref and cannot run the suite; run tests from /testbed as `python tests/runtests.py <label>` with labels like admin_widgets.tests.ClassName (a bare app label like admin_widgets also works).",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/pip list | grep -i django -> 'Django 4.1.dev20220226170756 /testbed'; `python tests/runtests.py ...` under base python -> ModuleNotFoundError: No module named 'asgiref'; with testbed python, `tests/runtests.py admin_widgets.tests.AdminFormfieldForDBFieldTests -v 2` ran 24 tests OK"
+        },
+        {
+          "id": "F8",
+          "claim": "Baseline tests are green: `admin_widgets` app suite = 'Ran 86 tests ... OK (skipped=14)'; class admin_widgets.tests.AdminFormfieldForDBFieldTests = 24 tests OK. The pre-existing related test test_radio_fields_ForeignKey (tests/admin_widgets/tests.py:135-142) asserts ff.empty_label is None for non-blank Event.main_band with radio_fields, a behavior that all candidate fixes preserve (non-blank radio FK -> None).",
+          "evidence": "`/opt/miniconda3/envs/testbed/bin/python tests/runtests.py admin_widgets 2>&1 | grep -E '^(Ran|OK|FAILED|ERROR)'` -> 'Ran 86 tests in 0.420s / OK (skipped=14)'; run of admin_widgets.tests.AdminFormfieldForDBFieldTests -> 'Ran 24 tests ... OK' incl. 'test_radio_fields_ForeignKey ... ok'; tests/admin_widgets/tests.py lines 135-142"
+        },
+        {
+          "id": "F9",
+          "claim": "Model context for tests: the only blank ForeignKey in tests/admin_widgets/models.py is Inventory.parent (lines 82-85: ForeignKey(\"self\", models.SET_NULL, to_field=\"barcode\", blank=True, null=True)); Event.main_band (lines 98-102) is non-blank; Inventory is registered in the test admin site (tests/admin_widgets/widgetadmin.py:68 'site.register(Inventory)'); the test helper assertFormfield (tests/admin_widgets/tests.py:75-99) builds an ad-hoc ModelAdmin from admin_overrides and calls formfield_for_dbfield(field, request=None).",
+          "evidence": "grep -n 'ForeignKey|blank=True' tests/admin_widgets/models.py and reads of models.py lines 60-102, 148-200; grep -n Inventory tests/admin_widgets/widgetadmin.py -> '68:site.register(Inventory)'; read of tests/admin_widgets/tests.py lines 75-99"
+        },
+        {
+          "id": "F10",
+          "claim": "No other admin code path needs changing: the only non-test occurrences of empty_label in django/contrib/admin are options.py:272 (the fix target) and options.py:232 (formfield_for_choice_field's blank_choice=[(\"\", _(\"None\"))]); the choice-field radio path already avoids stomping user overrides via `if \"choices\" not in kwargs` (options.py:228) and `if \"widget\" not in kwargs` (line 223), unlike the FK path which has no such guard on empty_label.",
+          "evidence": "grep -rn 'empty_label' django/contrib/admin/ --include=*.py | grep -v tests -> only options.py:272; grep -n '_(\"None\")' django/contrib/admin/options.py -> 232 and 272; read of options.py lines 217-231 shows the guarded choice-field branch"
+        },
+        {
+          "id": "F11",
+          "claim": "Uncertainty note (unverified recollection, not workspace evidence): released upstream Django fixed this by changing the same line to a form with identical semantics to the ticket's proposal (keep existing kwargs['empty_label'] if truthy, else default to _('None') for blank fields, else None); the only semantic difference among candidate fixes is the explicit-`empty_label=None`-on-blank-field edge, which the ticket's `or`-based proposal would still override. The hidden FAIL_TO_PASS test presumably mirrors the upstream fix commit and likely lives in tests/admin_widgets/tests.py; a test exercising the fix needs a blank FK (e.g., Inventory.parent) plus a ModelAdmin override of formfield_for_foreignkey passing a custom empty_label.",
+          "evidence": "No workspace file records the upstream fix commit; the claim rests on the verified behavior matrix (Fix A vs Fix B table above) and the ticket text, and is flagged as recollection rather than checked evidence"
+        }
+      ]
+    }
+  },
+  "fault": {
+    "id": "research-wrong",
+    "class": "accidental",
+    "type": "incorrect",
+    "target": {
+      "kind": "stage",
+      "stage": "research"
+    },
+    "action": "replace",
+    "findings": {
+      "summary": "The workspace is the Django source tree itself (4.1.0.dev, base commit from 2022-02-26, top commit 8c88abd860 \"SWE-bench\", clean tree), not a Django app. The ticket's bug is real and located at django/contrib/admin/options.py:232 inside ModelAdmin.formfield_for_choice_field: when a ForeignKey is in radio_fields and is blank, the radio_fields branch calls the choice-field path and `kwargs[\"empty_label\"] = _(\"None\") if db_field.blank else None` unconditionally clobbers any `empty_label` a user's formfield_for_foreignkey override passed in. I reproduced the bug in-process (custom label lost, replaced by localized \"None\") and verified a behavior matrix for the ticket's proposed fix (`(kwargs.get(\"empty_label\") or _(\"None\")) if db_field.blank else None`) vs the `kwargs.get(\"empty_label\", _(\"None\"))` variant: both fix the reported case and keep non-blank behavior (empty_label=None) identical; only the explicit-`empty_label=None`-on-blank-field edge differs. The repo enforces 88-char Black lines, so the fix line must be wrapped (verified `black --check`-clean 3-line form). Tests run with the conda env interpreter `/opt/miniconda3/envs/testbed/bin/python` (Py3.9, Django installed editable from /testbed) via `python tests/runtests.py <label>`; the existing admin_widgets suite (86 tests) and admin_widgets.tests.AdminFormfieldForDBFieldTests (24 tests) are green at baseline, including test_radio_fields_ForeignKey which asserts empty_label is None for a non-blank radio FK and is unaffected by the fix. The only blank FK in tests/admin_widgets/models.py is Inventory.parent; the analogous FK path (options.py:246-280) already guards user overrides via `if \"empty_label\" not in kwargs` and needs no change. The single-line fix at options.py:232 is the only source change required.",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "The workspace is a Django source-tree checkout (not a Django app): /testbed contains django/, tests/, docs/; git branch main, top commit 8c88abd860 'SWE-bench', working tree clean; django/__init__.py declares VERSION = (4, 1, 0, \"alpha\", 0).",
+          "evidence": "ls /testbed shows django/, tests/, docs/, setup.py; `git -C /testbed log -1` -> '8c88abd860 SWE-bench', `git status` -> 'On branch main / nothing to commit, working tree clean'; django/__init__.py line 4: VERSION = (4, 1, 0, \"alpha\", 0)"
+        },
+        {
+          "id": "F2",
+          "claim": "The buggy line is django/contrib/admin/options.py:232, inside ModelAdmin.formfield_for_choice_field (method def at line 217; the `if db_field.name in self.radio_fields:` branch at lines 228-232): `kwargs[\"empty_label\"] = _(\"None\") if db_field.blank else None`, which overwrites any user-supplied kwargs['empty_label'] for blank FKs in radio_fields. The FK method at options.py:246 passes radio_fields kwargs to this choice-field path; its line 272 uses `kwargs.setdefault(...)` and does not clobber. `_` is `gettext` imported at line 65.",
+          "evidence": "grep -n \"empty_label\" django/contrib/admin/options.py -> '232:                kwargs[\"empty_label\"] = _(\"None\") if db_field.blank else None'; read of options.py lines 217-235 and 246-280 shows the choice-field branch and the FK method's guarded setdefault; line 65: from django.utils.translation import gettext as _"
+        },
+        {
+          "id": "F3",
+          "claim": "The bug is reproducible: with a ModelAdmin whose radio_fields include a blank ForeignKey and whose formfield_for_foreignkey override sets kwargs['empty_label'] = 'MY CUSTOM LABEL', the returned form field's empty_label is the localized 'None' instead of the custom label; without the override it is also 'None'. The override is invoked, but the choice-field branch at options.py:232 later replaces the value.",
+          "evidence": "Ran a script with /opt/miniconda3/envs/testbed/bin/python using settings.configure() and a blank FK to auth.User with radio_fields={'fk': admin.VERTICAL}: printed \"default empty_label: 'None'\" and \"custom empty_label:  'None'\" (custom label lost)."
+        },
+        {
+          "id": "F4",
+          "claim": "At the forms level there is no clobbering: ModelChoiceField.__init__ (django/forms/models.py:1439-1470) takes empty_label='---------' by default and, unless (required and initial is not None) or (widget is a RadioSelect subclass and not blank), sets self.empty_label to the passed value; the empty choice is emitted only when field.empty_label is not None (ModelChoiceIterator, models.py:1401-1402); docs/ref/forms/fields.txt:1240-1256 documents that empty_label=None suppresses the empty choice. So a custom empty_label string reaches the form field intact for a blank radio FK \u2014 only the admin code at options.py:232 discards it.",
+          "evidence": "read of django/forms/models.py lines 1439-1470 (the RadioSelect/not-blank branch sets self.empty_label = None, else self.empty_label = empty_label); models.py lines 1401-1402 `if self.field.empty_label is not None: yield (\"\", self.field.empty_label)`; docs/ref/forms/fields.txt lines 1240-1256"
+        },
+        {
+          "id": "F5",
+          "claim": "Verified in-process behavior matrix for a radio FK (AdminRadioSelect widget) under three versions of the choice-field line: current line 232 -> blank+custom='None' (bug), blank+explicit-None='None', non-blank (any input)=None. Ticket's proposed fix `(kwargs.get(\"empty_label\") or _(\"None\")) if db_field.blank else None` -> blank+custom='CUSTOM', blank+explicit-None='None' (still clobbered), non-blank=None. Alternative `kwargs.get(\"empty_label\", _(\"None\")) if db_field.blank else None` -> blank+custom='CUSTOM', blank+explicit-None=None (respected), non-blank=None. Both fix the reported bug; only the explicit-None edge case differs.",
+          "evidence": "Ran simulation script in /opt/miniconda3/envs/testbed/bin/python printing: 'current blank=True | label=...-> None | label=CUSTOM -> 'None' | label=None -> 'None'' ... 'fixA(ticket) blank=True | ... label=CUSTOM -> 'CUSTOM' | label=None -> 'None'' ... 'fixB(get default) blank=True | ... label=CUSTOM -> 'CUSTOM' | label=None -> None'; non-blank rows all None for all three variants"
+        },
+        {
+          "id": "F6",
+          "claim": "The repo enforces 88-character lines via Black (recent commit 7119f40c98 'Refs #33476 -- Refactored code to strictly match 88 characters line length.'); the one-line ticket-proposed fix at 16-space indent exceeds 88 chars and fails `black --check`, but the wrapped form passes: `kwargs[\"empty_label\"] = (\n    (kwargs.get(\"empty_label\") or _(\"None\")) if db_field.blank else None\n)`.",
+          "evidence": "git log --oneline -- django/contrib/admin/options.py shows 7119f40c98; piped candidate code to /opt/miniconda3/envs/testbed/bin/black -q --check - -> single-line version exit=1, black's reformatted 3-line version exit=0"
+        },
+        {
+          "id": "F7",
+          "claim": "Test environment: the working interpreter is /opt/miniconda3/envs/testbed/bin/python (Python 3.9.20) with asgiref 3.8.1, sqlparse 0.5.1, selenium 4.25.0 and 'Django 4.1.dev20220226170756' installed editable from /testbed; the default `python` on PATH (miniconda base, Python 3.11.5) lacks asgiref and cannot run the suite; run tests from /testbed as `python tests/runtests.py <label>` with labels like admin_widgets.tests.ClassName (a bare app label like admin_widgets also works).",
+          "evidence": "/opt/miniconda3/envs/testbed/bin/pip list | grep -i django -> 'Django 4.1.dev20220226170756 /testbed'; `python tests/runtests.py ...` under base python -> ModuleNotFoundError: No module named 'asgiref'; with testbed python, `tests/runtests.py admin_widgets.tests.AdminFormfieldForDBFieldTests -v 2` ran 24 tests OK"
+        },
+        {
+          "id": "F8",
+          "claim": "Baseline tests are green: `admin_widgets` app suite = 'Ran 86 tests ... OK (skipped=14)'; class admin_widgets.tests.AdminFormfieldForDBFieldTests = 24 tests OK. The pre-existing related test test_radio_fields_ForeignKey (tests/admin_widgets/tests.py:135-142) asserts ff.empty_label is None for non-blank Event.main_band with radio_fields, a behavior that all candidate fixes preserve (non-blank radio FK -> None).",
+          "evidence": "`/opt/miniconda3/envs/testbed/bin/python tests/runtests.py admin_widgets 2>&1 | grep -E '^(Ran|OK|FAILED|ERROR)'` -> 'Ran 86 tests in 0.420s / OK (skipped=14)'; run of admin_widgets.tests.AdminFormfieldForDBFieldTests -> 'Ran 24 tests ... OK' incl. 'test_radio_fields_ForeignKey ... ok'; tests/admin_widgets/tests.py lines 135-142"
+        },
+        {
+          "id": "F9",
+          "claim": "Model context for tests: the only blank ForeignKey in tests/admin_widgets/models.py is Inventory.parent (lines 82-85: ForeignKey(\"self\", models.SET_NULL, to_field=\"barcode\", blank=True, null=True)); Event.main_band (lines 98-102) is non-blank; Inventory is registered in the test admin site (tests/admin_widgets/widgetadmin.py:68 'site.register(Inventory)'); the test helper assertFormfield (tests/admin_widgets/tests.py:75-99) builds an ad-hoc ModelAdmin from admin_overrides and calls formfield_for_dbfield(field, request=None).",
+          "evidence": "grep -n 'ForeignKey|blank=True' tests/admin_widgets/models.py and reads of models.py lines 60-102, 148-200; grep -n Inventory tests/admin_widgets/widgetadmin.py -> '68:site.register(Inventory)'; read of tests/admin_widgets/tests.py lines 75-99"
+        },
+        {
+          "id": "F10",
+          "claim": "No other admin code path needs changing: the only non-test occurrences of empty_label in django/contrib/admin are options.py:232 (the fix target) and options.py:272 (formfield_for_foreignkey's guarded `kwargs.setdefault(\"empty_label\", ...)`); the FK radio path already avoids stomping user overrides via `if \"empty_label\" not in kwargs` (options.py:271) and `if \"widget\" not in kwargs` (line 266), unlike the choice-field path which has no such guard on empty_label.",
+          "evidence": "grep -rn 'empty_label' django/contrib/admin/ --include=*.py | grep -v tests -> only options.py:232 and options.py:272; grep -n '_(\"None\")' django/contrib/admin/options.py -> 232 and 272; read of options.py lines 217-231 shows the unguarded choice-field branch and lines 246-280 shows the guarded FK branch"
+        },
+        {
+          "id": "F11",
+          "claim": "Uncertainty note (unverified recollection, not workspace evidence): released upstream Django fixed this by changing the same choice-field line to a form with identical semantics to the ticket's proposal (keep existing kwargs['empty_label'] if truthy, else default to _('None') for blank fields, else None); the only semantic difference among candidate fixes is the explicit-`empty_label=None`-on-blank-field edge, which the ticket's `or`-based proposal would still override. The hidden FAIL_TO_PASS test presumably mirrors the upstream fix commit and likely lives in tests/admin_widgets/tests.py; a test exercising the fix needs a blank FK (e.g., Inventory.parent) plus a ModelAdmin override of formfield_for_foreignkey passing a custom empty_label.",
+          "evidence": "No workspace file records the upstream fix commit; the claim rests on the verified behavior matrix (Fix A vs Fix B table above) and the ticket text, and is flagged as recollection rather than checked evidence"
+        }
+      ]
+    }
+  }
+}

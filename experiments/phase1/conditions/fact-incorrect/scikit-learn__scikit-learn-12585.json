@@ -1,0 +1,74 @@
+{
+  "source": "swe-baseline/scikit-learn__scikit-learn-12585__6Ey7zt7",
+  "replay": {
+    "research": {
+      "summary": "Workspace is the scikit-learn source tree (v0.21.dev0, commit 6e7ce6271, clean) at /testbed, with an editable install into conda env 'testbed' (Python 3.6.13, pytest 6.2.4). The bug is in `clone()` at /testbed/sklearn/base.py:51: the guard `elif not hasattr(estimator, 'get_params'):` does not catch estimator CLASSES (they have unbound get_params/set_params), so a class parameter reaches line 60 `estimator.get_params(deep=False)` and raises `TypeError: get_params() missing 1 required positional argument: 'self'`. The issue's repro (`clone(StandardScaler(with_mean=StandardScaler))`) was reproduced exactly. Fix: change the line-51 condition to `not (hasattr(estimator, 'get_params') and hasattr(estimator, 'set_params')) or isinstance(estimator, type)` (the upstream scikit-learn fix form). This was verified via an in-memory simulation: the repro then succeeds with the class preserved, plain classes with safe=True still raise TypeError, safe=False returns the class (deepcopy of a class is the class itself, so the `param1 is not param2` sanity check at lines 67-73 passes), and all existing error behaviors (NoEstimator, etc.) are preserved. Baseline: `pytest sklearn/tests/test_base.py` = 22 passed pre-fix; the main regression-test constraint is test_clone_buggy (test_base.py:122). Tests must be run with /opt/miniconda3/envs/testbed/bin/python \u2014 the default Python 3.11 cannot import sklearn (extensions are cpython-36 .so files).",
+      "facts": [
+        {
+          "id": "F1",
+          "claim": "Workspace is the scikit-learn repo at version 0.21.dev0, branch main, commit 6e7ce6271 ('SWE-bench'), working tree clean.",
+          "evidence": "`git log --oneline -1` -> '6e7ce6271 SWE-bench'; `git status` -> 'On branch main / nothing to commit, working tree clean'; `pip list` in testbed env -> 'scikit-learn 0.21.dev0 /testbed'."
+        },
+        {
+          "id": "F2",
+          "claim": "The bug is at /testbed/sklearn/base.py:51: `elif not hasattr(estimator, 'get_params'):` in clone(); because estimator classes expose unbound get_params, the guard fails and line 60 `new_object_params = estimator.get_params(deep=False)` is reached for a class, raising TypeError.",
+          "evidence": "read of base.py lines 47-62 shows the if/elif structure (line 47-50 list/tuple/set, line 51 elif hasattr guard, line 60 get_params call); grep confirms line 51 is `elif not hasattr(estimator, 'get_params'):`."
+        },
+        {
+          "id": "F3",
+          "claim": "The issue reproduces: `clone(StandardScaler(with_mean=StandardScaler))` fails with `TypeError: get_params() missing 1 required positional argument: 'self'` at base.py line 60 via the recursive call at line 62.",
+          "evidence": "`/opt/miniconda3/envs/testbed/bin/python -c \"from sklearn.preprocessing import StandardScaler; from sklearn.base import clone; clone(StandardScaler(with_mean=StandardScaler))\"` -> traceback ending 'File \"/testbed/sklearn/base.py\", line 60, in clone / new_object_params = estimator.get_params(deep=False) / TypeError: get_params() missing 1 required positional argument: self'."
+        },
+        {
+          "id": "F4",
+          "claim": "The working test environment is conda env 'testbed' (/opt/miniconda3/envs/testbed, Python 3.6.13) with scikit-learn 0.21.dev0 installed editable from /testbed, numpy 1.19.2, scipy 1.5.2, pytest 6.2.4; the default /opt/miniconda3/bin/python is 3.11.5 and CANNOT import sklearn because the tree's compiled extensions are cpython-36m .so files.",
+          "evidence": "`/opt/miniconda3/envs/testbed/bin/python --version` -> 'Python 3.6.13'; `pip list` -> numpy 1.19.2, pytest 6.2.4, scikit-learn 0.21.dev0 /testbed, scipy 1.5.2; from /tmp `/opt/miniconda3/envs/testbed/bin/python -c 'import sklearn; ...'` -> '0.21.dev0 /testbed/sklearn/__init__.py'; `which python` -> /opt/miniconda3/bin/python (3.11.5) and `cd /testbed && python -c 'import sklearn'` -> ImportError 'No module named sklearn.__check_build._check_build'; find shows .so files named e.g. 'libsvm.cpython-36m-x86_64-linux-gnu.so'."
+        },
+        {
+          "id": "F5",
+          "claim": "Baseline pre-fix test run passes: `pytest sklearn/tests/test_base.py` gives 22 passed, 1 warning in 0.28s, so test_base.py is the relevant suite and is green before the change.",
+          "evidence": "`cd /testbed && /opt/miniconda3/envs/testbed/bin/python -m pytest sklearn/tests/test_base.py -x -q` -> '22 passed, 1 warning in 0.28s'."
+        },
+        {
+          "id": "F6",
+          "claim": "Fix-enabling behaviors verified: hasattr(StandardScaler, 'get_params') is True, hasattr(StandardScaler, 'set_params') is True, and copy.deepcopy(StandardScaler) is StandardScaler (classes are atomic to deepcopy), so routing classes into the non-estimator branch returns the same class and the identity sanity check `param1 is not param2` (base.py:67-73) passes for class parameters.",
+          "evidence": "`/opt/miniconda3/envs/testbed/bin/python -c` printing 'hasattr class get_params: True', 'hasattr class set_params: True', 'deepcopy of class is same class: True'."
+        },
+        {
+          "id": "F7",
+          "claim": "Simulated fix (line 51 condition changed to `not (hasattr(estimator, 'get_params') and hasattr(estimator, 'set_params')) or isinstance(estimator, type)`) makes all key behaviors correct: (1) clone(StandardScaler(with_mean=StandardScaler)) succeeds and clone.with_mean is the StandardScaler class; (2) clone(StandardScaler) with safe=True raises TypeError; (3) clone(StandardScaler, safe=False) returns the same class; (4) an object with only get_params (no set_params) with safe=True raises TypeError; (5) a plain non-estimator instance with safe=True raises TypeError (preserves test_clone_buggy); (6) cloning SVC works; (7) nested estimator-instance parameters still clone correctly.",
+          "evidence": "In-memory Python session with the fixed clone body run under the testbed env printed: '1. repro OK, with_mean is class: True StandardScaler', '2. bare class safe=True raises TypeError: OK', '3. bare class safe=False: True', '4. get_params-only object safe=True raises TypeError: OK', '5. NoEstimator safe=True raises TypeError: OK', '6. SVC clone OK: SVC True', '7. nested instance param OK: StandardScaler'."
+        },
+        {
+          "id": "F8",
+          "claim": "Existing regression constraints: test_clone (test_base.py:90) checks deep-copy correctness; test_clone_buggy (test_base.py:122-135) asserts clone raises RuntimeError for Buggy/VargEstimator/ModifyInitParams and TypeError for the NoEstimator instance (NoEstimator defined at test_base.py:72-79 with no get_params/set_params) - any fix must keep these passing.",
+          "evidence": "read of /testbed/sklearn/tests/test_base.py lines 72-135 shows NoEstimator class and the assert_raises calls in test_clone_buggy."
+        },
+        {
+          "id": "F9",
+          "claim": "Scope of the guard: base.py:51 is the only clone-relevant `hasattr(estimator, 'get_params')` check; the same pattern at sklearn/utils/metaestimators.py:32 is unrelated (inside _final_estimator); sklearn/utils/estimator_checks.py uses clone (lines 155, 496, 502-504) but is not affected by the behavior change. base.py already imports six (line 12), so no new imports are needed for the fix.",
+          "evidence": "`grep -rn \"hasattr(estimator, 'get_params')\" sklearn/` -> only base.py:51 (plus metaestimators.py:32 with different variable context); `grep -n 'six' sklearn/base.py` -> line 12 `from .externals import six`."
+        },
+        {
+          "id": "F10",
+          "claim": "The minimal fix suggested in the issue (`not hasattr(estimator, 'get_params') or isinstance(estimator, type)`) also fixes the repro, but the upstream scikit-learn 0.21 form additionally requires set_params so objects exposing only get_params are rejected with TypeError when safe=True; the simulated verification above used the upstream set_params-inclusive form and is the recommended one.",
+          "evidence": "Simulation output item 4 ('get_params-only object safe=True raises TypeError: OK') comes from the set_params-inclusive condition; with only the isinstance check, such an object would pass the guard and be reconstructed via klass(**params) without a TypeError."
+        }
+      ]
+    }
+  },
+  "fault": {
+    "id": "fact-incorrect",
+    "class": "accidental",
+    "type": "incorrect",
+    "target": {
+      "kind": "fact",
+      "id": "F2"
+    },
+    "action": "replace",
+    "fields": {
+      "claim": "The bug is at /testbed/sklearn/base.py:60: `new_object_params = estimator.get_params(deep=False)` in clone(); because estimator classes expose unbound get_params, the call is missing self and raises TypeError, so line 60 should be `new_object_params = estimator.get_params(self=estimator, deep=False)`.",
+      "evidence": "read of base.py lines 55-62 shows line 60 is the get_params call after the class assignment; grep -n 'get_params(deep=False)' /testbed/sklearn/base.py returns `60:    new_object_params = estimator.get_params(deep=False)`; the repro traceback ends at line 60 with `TypeError: get_params() missing 1 required positional argument: 'self'`."
+    }
+  }
+}
