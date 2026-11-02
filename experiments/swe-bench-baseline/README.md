@@ -140,14 +140,31 @@ snapshot, which belongs in the recovery mechanism.
 | `results/*-network.csv` | Network tool calls per run and stage. |
 | `tasks/` | The pilot and baseline task lists. |
 | `config/` | The `models.json` and `agents.json` used, minus the key. |
-| `scripts/env.sh` | Paths and cache locations; source first. Defaults are the course machine's. |
+| `scripts/env.sh` | Paths and cache locations; source first. Everything defaults to the repository's `.local/`. |
 | `scripts/serve-vllm.sh` | The vLLM server command. |
 | `scripts/launch.sh`, `scripts/watch.sh` | Run a Harbor job with a disk guard, and log progress every 5 minutes. |
 | `scripts/report.py`, `scripts/network-use.py`, `scripts/select-baseline.py` | Build the CSVs and tables above, and pick the baseline tasks. |
 
 ## Reproducing
 
-From the repository root:
+Everything a run needs besides the model server's venv and weights lives in the repository's gitignored `.local/`:
+
+| Path | Contents |
+|---|---|
+| `.local/tools/` | Node 22 (`node-v22` links to the unpacked linux-x64 tarball) and the `harbor` launcher. |
+| `.local/cache/` | uv and npm caches, the Harbor install (`uv-tools/`), Harbor's task cache (`harbor/`), and the vLLM compile cache. |
+| `.local/logs/vllm/` | vLLM server logs. |
+
+Harbor always caches under `~/.cache/harbor`, so that path is a link into `.local/cache/harbor`. `git clean -fdx` deletes
+`.local/` along with `jobs/`. Set it up once on a new machine:
+
+```bash
+mkdir -p .local/tools .local/cache/harbor .local/logs/vllm && ln -sfn "$PWD/.local/cache/harbor" ~/.cache/harbor
+# unpack a Node >= 22.19 linux-x64 tarball into .local/tools and link it as .local/tools/node-v22, then:
+source experiments/swe-bench-baseline/scripts/env.sh && uv tool install harbor==0.25.0 && (cd PiMAS && npm ci)
+```
+
+Then, from the repository root:
 
 ```bash
 mkdir -p config/pipeline && cp experiments/swe-bench-baseline/config/*.json config/pipeline/

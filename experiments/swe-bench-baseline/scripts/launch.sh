@@ -10,7 +10,7 @@ source "$(dirname "$0")/env.sh"
 tasks=$(realpath "$2"); name=$1; shift 2
 mkdir -p "$JOBS_DIR"; log=$JOBS_DIR/$name.log; guard=$JOBS_DIR/$name.guard.log
 VLLM_API_KEY=$(cat "$VLLM_API_KEY_FILE"); export VLLM_API_KEY
-cd "$PIMAS_ROOT"; export PYTHONPATH=$PIMAS_ROOT
+cd "$REPO_ROOT"; export PYTHONPATH=$REPO_ROOT
 inc=(); while read -r t; do [ -n "$t" ] && inc+=(-i "swe-bench/$t"); done < "$tasks"
 echo "start $(date -Is) free=$(df -BG --output=avail "$DOCKER_MOUNT" | tail -1)" > "$guard"
 harbor run -d swe-bench/swe-bench-verified -n "${N:-8}" -k "${K:-1}" "${inc[@]}" "$@" \

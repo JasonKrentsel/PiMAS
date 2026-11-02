@@ -4,3 +4,5 @@
 /jobs/
 /results/
 __pycache__/
+# Tools, caches and logs for running experiments here (see experiments/swe-bench-baseline/README.md).
+/.local/
