@@ -36,6 +36,8 @@ Harbor ── pimas_harbor.agent:PimasAgent (Python, host) ── environment.ex
 - for executor stages, the same file changes split at each `begin_step` (`stepFileChanges`, also streamed as `step_files` events), so a step's effects, including those of shell commands, can be found and undone on their own
 - for stages with workspace tools, when the working directory is a git work tree: the cumulative `git diff HEAD` of that directory at stage end, saved as `patches/<stage>.diff`, plus the untracked files it does not cover
 
+**Faults and replay.** With `PIMAS_CONDITIONS`, a stage can be replayed from a saved clean output instead of run (status `replayed`, no prompt), and at most one controlled fault is applied. The fault and where it fired are logged once, as a `fault` event and as `fault` in `summary.json`, with the original and delivered content; `injection` is `null` if its target never occurred. See [`experiments/phase1/README.md`](../experiments/phase1/README.md).
+
 File contents are not stored apart from these patches. Per-step token use is derived from the session files: each assistant message lists its tool-call IDs, and `tool-calls.jsonl` maps those to steps.
 
 **Budgets.**
@@ -52,7 +54,7 @@ Everything for one trial is in `jobs/<condition>/<replicate>/<trial>/`. Nothing 
 | `result.json` | Harbor's trial result: reward, exception, timings for setup, agent and verifier |
 | `config.json`, `lock.json` | Harbor's trial configuration, including `--ae` settings and the pinned task |
 | `verifier/reward.txt`, `verifier/ctrf.json` | Official grade and per-test results (`trace_results.json` for the warranty task) |
-| `agent/pimas/run-info.json` | Git commit, branch and uncommitted files; Pi and Harbor versions; host; settings; config and prompt hashes; container working directory; bridge exit; whole-run file-change counts and scan times. Written before the run starts and updated at the end |
+| `agent/pimas/run-info.json` | Git commit, branch and uncommitted files; Pi and Harbor versions; host; settings; the condition file and its hash; config and prompt hashes; container working directory; bridge exit and final status (a bridge that never reports success fails the trial); whole-run file-change counts and scan times. Written before the run starts and updated at the end |
 | `agent/pimas/instruction.md` | The task instruction as given to the agent |
 | `agent/pimas/config/` | Copies of `models.json` (credentials redacted), `agents.json`, and each role's prompt as used |
 | `agent/pimas/provenance.jsonl` | Run settings (budgets, limits, role profiles), then per stage: start with prompt, session file, compact tool calls, per-step file changes, end with the full artifact |
@@ -199,6 +201,8 @@ Agent environment variables, set with `--ae KEY=VALUE` or in the shell:
 | `PIMAS_NODE` | `node` | Node executable |
 | `PIMAS_SNAPSHOT_ROOT` | `/` | Directory tracked for per-stage file changes; `none` turns it off |
 | `PIMAS_RUN_SNAPSHOT` | `1` | `0` skips the whole-container manifests before and after the run |
+| `PIMAS_CONDITIONS` | none | Folder of per-task condition files, `<task>.json`, with replayed stage outputs and at most one fault. A task with no file fails the trial |
+| `PIMAS_OFFLINE` | `0` | `1` disconnects the task container from its docker networks while the agent works, so it cannot fetch the upstream fix, and reconnects them for grading. A container that still reaches the internet fails the trial. Recorded as `network` in `run-info.json` |
 
 ## Tests
 

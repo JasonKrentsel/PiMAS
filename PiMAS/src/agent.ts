@@ -39,6 +39,8 @@ interface RoleSessionOptions {
   /** Run native tools through this workspace instead of the host filesystem. */
   workspace?: Workspace;
   commandLimits?: CommandLimits;
+  /** Applied to each native tool, e.g. to inject a controlled fault into one call. */
+  wrapTool?: (tool: ToolDefinition) => ToolDefinition;
 }
 
 /** The caller owns prompting, local history, and abort/dispose of each Pi session. */
@@ -103,9 +105,10 @@ export async function createRoleSession(options: RoleSessionOptions): Promise<Ag
   }
   const nativeNames = TOOLSETS[options.toolset ?? (options.role === "executor" ? "execute" : "read")];
   // Without a workspace, Pi's own local tools are used and only bash needs the timeout policy.
-  const nativeTools = options.workspace
+  const nativeTools = (options.workspace
     ? createWorkspaceTools(options.workspace, nativeNames, options.commandLimits)
-    : nativeNames.includes("bash") ? [createExecutorBashTool(options.cwd)] : [];
+    : nativeNames.includes("bash") ? [createExecutorBashTool(options.cwd)] : []
+  ).map((tool) => options.wrapTool?.(tool) ?? tool);
   const customTools: ToolDefinition[] = [...suppliedTools, ...nativeTools];
   const { session } = await createAgentSession({
     cwd: options.cwd,

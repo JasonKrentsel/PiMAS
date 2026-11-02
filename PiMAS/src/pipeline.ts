@@ -4,6 +4,7 @@ import path from "node:path";
 import { Type, type Usage } from "@earendil-works/pi-ai";
 import { defineTool, SessionManager, type AgentSession, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createRoleSession, type Toolset } from "./agent.js";
+import { dropsStage, faultFindings, faultPlan, faultTools, type Condition, type FaultInjection, type FaultSpec, type ToolFaults } from "./faults.js";
 import type { AgentConfig, AgentRole } from "./agent-config.js";
 import type { CommandLimits } from "./execution-tools.js";
 import { FileTracker, SNAPSHOT_DIR, type Snapshot } from "./filesystem.js";
@@ -41,6 +42,8 @@ export interface PipelineOptions {
   toolCallBudgets?: Partial<Record<StageName, number>>;
   /** Directory whose files are tracked per stage (default "/"); null turns tracking off. */
   snapshotRoot?: string | null;
+  /** Replayed clean outputs and at most one controlled fault (pipeline mode only). */
+  condition?: Condition;
   signal?: AbortSignal;
 }
 
@@ -59,6 +62,8 @@ export interface PipelineResult {
   usage: Usage;
   durationMs: number;
   provenanceFile: string;
+  /** The run's fault, where it first fired, and how often; null injection means its target never occurred. */
+  fault: { spec: FaultSpec; injection: FaultInjection | null; injections: number } | null;
 }
 
 export const PIPELINE_COMMAND_LIMITS: CommandLimits = { defaultSeconds: 600, maxSeconds: 3600 };
@@ -84,7 +89,16 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   const tracker = snapshotRoot === null
     ? null
     : new FileTracker(options.workspace, snapshotRoot, `run-${randomUUID().slice(0, 8)}`);
-  const context: StageContext = { options, log, artifacts, tracker };
+  const condition = options.condition;
+  if (condition && mode !== "pipeline") throw new Error("Conditions apply to pipeline mode only");
+  const fault = condition?.fault ?? null;
+  const injections: FaultInjection[] = [];
+  const injected = (record: FaultInjection) => {
+    injections.push(record);
+    void log.record({ type: "fault", injection: record });
+  };
+  const toolFaults = faultTools(fault, injected, (options.commandLimits ?? PIPELINE_COMMAND_LIMITS).defaultSeconds, options.workspace);
+  const context: StageContext = { options, log, artifacts, tracker, fault, injected, toolFaults };
   // Everything that shapes agent behavior, so a later reader can tell runs apart.
   const settings = {
     workspaceCwd: options.workspace.cwd,
@@ -94,6 +108,9 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     submitAllowance: SUBMIT_ALLOWANCE,
     snapshotRoot,
     roles: options.roles,
+    condition: condition
+      ? { source: condition.source, replayed: Object.keys(condition.replay), fault, sha256: contentDigest(condition) }
+      : null,
   };
   await log.record({ type: "run_start", mode, review, request: options.request, settings });
 
@@ -107,19 +124,30 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
         submitTool: reportTool([]),
       });
     } else {
-      const research = await runStage<Findings>(context, {
-        id: "research", stage: "research", role: "researcher", toolset: "inspect", parents: [],
-        prompt: researchPrompt(options.request),
-        submitTool: findingsTool(),
-      });
-      const findings = research.submission ?? { summary: "The researcher submitted no findings.", facts: [] };
+      const research = condition?.replay.research
+        ? await replayStage(context, "research", "researcher", [], condition.replay.research)
+        : dropsStage(fault, "research")
+          ? await dropStage<Findings>(context, "research", "researcher", [], NO_FINDINGS)
+          : await runStage<Findings>(context, {
+            id: "research", stage: "research", role: "researcher", toolset: "inspect", parents: [],
+            prompt: researchPrompt(options.request),
+            submitTool: findingsTool(),
+          });
+      // A fact fault changes what the planner and every later stage see; the research artifact keeps the real output.
+      const [findings, factFault] = faultFindings(fault, research.submission ?? NO_FINDINGS, "plan");
+      if (factFault) injected(factFault);
 
-      const planning = await runStage<Plan>(context, {
-        id: "plan", stage: "plan", role: "planner", toolset: "none", parents: ["research"],
-        prompt: planPrompt(options.request, findings),
-        submitTool: planTool(findings),
-      });
-      const plan = planning.submission ?? { summary: "The planner submitted no plan.", steps: [] };
+      const planning = condition?.replay.plan
+        ? await replayStage(context, "plan", "planner", ["research"], condition.replay.plan)
+        : dropsStage(fault, "plan")
+          ? await dropStage<Plan>(context, "plan", "planner", ["research"], NO_PLAN)
+          : await runStage<Plan>(context, {
+            id: "plan", stage: "plan", role: "planner", toolset: "none", parents: ["research"],
+            prompt: planPrompt(options.request, findings),
+            submitTool: planTool(findings),
+          });
+      const [plan, stepFault] = faultPlan(fault, planning.submission ?? NO_PLAN, "execute");
+      if (stepFault) injected(stepFault);
 
       let execution = await runStage<ExecutionReport>(context, {
         id: "execute", stage: "execute", role: "executor", toolset: "execute", parents: ["plan", "research"],
@@ -157,12 +185,14 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   }
 
   const interrupted = options.signal?.aborted ?? false;
-  const status = interrupted ? "interrupted" : artifacts.every((artifact) => artifact.status === "submitted") ? "completed" : "incomplete";
+  const done = (artifact: StageArtifact) => artifact.status === "submitted" || artifact.status === "replayed";
+  const status = interrupted ? "interrupted" : artifacts.every(done) ? "completed" : "incomplete";
   const durationMs = Date.now() - started;
   await log.record({ type: "run_end", status, durationMs });
   return {
     status, approved, artifacts, durationMs, provenanceFile: log.file,
     usage: sumUsage(artifacts.map((artifact) => artifact.usage)),
+    fault: fault ? { spec: fault, injection: injections[0] ?? null, injections: injections.length } : null,
   };
 }
 
@@ -171,6 +201,9 @@ interface StageContext {
   log: ProvenanceLog;
   artifacts: StageArtifact[];
   tracker: FileTracker | null;
+  fault: FaultSpec | null;
+  injected: (record: FaultInjection) => void;
+  toolFaults: ToolFaults;
 }
 
 interface StageSpec<T> {
@@ -250,6 +283,7 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
       toolset: spec.toolset,
       workspace: options.workspace,
       commandLimits: options.commandLimits ?? PIPELINE_COMMAND_LIMITS,
+      wrapTool: context.toolFaults(spec.stage, spec.id, () => currentStep),
     });
     const active = session;
     await log.record({ type: "stage_session", id: spec.id, sessionFile: active.sessionManager.getSessionFile() ?? null });
@@ -342,6 +376,50 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
   }
   context.artifacts.push(artifact);
   await log.record({ type: "stage_end", artifact });
+  return { artifact, submission };
+}
+
+const NO_FINDINGS: Findings = { summary: "The researcher submitted no findings.", facts: [] };
+const NO_PLAN: Plan = { summary: "The planner submitted no plan.", steps: [] };
+
+/** Records a saved clean output in place of running the stage, so replayed runs read like any other. */
+async function replayStage<T>(context: StageContext, id: StageName, role: AgentRole, parents: string[], content: T): Promise<StageOutcome<T>> {
+  const now = new Date().toISOString();
+  return recordStage(context, {
+    id, stage: id, role, parents, status: "replayed", content, sha256: contentDigest(content), error: null,
+    startedAt: now, endedAt: now, latencyMs: 0,
+  }, content);
+}
+
+/** A stage-loss fault: the stage is not run and downstream stages get the same placeholder a real timeout would leave. */
+async function dropStage<T>(context: StageContext, id: StageName, role: AgentRole, parents: string[], placeholder: T): Promise<StageOutcome<T>> {
+  const now = new Date().toISOString();
+  context.injected({
+    faultId: context.fault!.id, stageId: id, stepId: null, toolCallId: null,
+    original: "(stage not run)", delivered: JSON.stringify(placeholder), at: now,
+  });
+  await recordStage(context, {
+    id, stage: id, role, parents, status: "failed", content: null, sha256: null,
+    error: `Injected fault ${context.fault!.id}: the stage timed out before submitting`, startedAt: now, endedAt: now, latencyMs: 0,
+  }, undefined);
+  return { artifact: context.artifacts.at(-1)!, submission: undefined };
+}
+
+async function recordStage<T>(
+  context: StageContext,
+  fields: Pick<StageArtifact, "id" | "stage" | "role" | "parents" | "status" | "content" | "sha256" | "error" | "startedAt" | "endedAt" | "latencyMs">,
+  submission: T | undefined,
+): Promise<StageOutcome<T>> {
+  const artifact: StageArtifact = {
+    ...fields, usage: sumUsage([]), toolCalls: [], changedFiles: null, fileChanges: null,
+    stepFileChanges: null, workspacePatch: null, sessionFile: null,
+  };
+  // No prompt was sent; the start event keeps every stage visible to readers that walk stage_start.
+  await context.log.record({
+    type: "stage_start", id: fields.id, stage: fields.stage, role: fields.role, parents: fields.parents, prompt: "", promptSha256: contentDigest(""),
+  });
+  context.artifacts.push(artifact);
+  await context.log.record({ type: "stage_end", artifact });
   return { artifact, submission };
 }
 

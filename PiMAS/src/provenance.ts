@@ -3,6 +3,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { AgentRole } from "./agent-config.js";
+import type { FaultInjection } from "./faults.js";
 import type { FileChanges } from "./filesystem.js";
 
 export type StageName = "research" | "plan" | "execute" | "review" | "correct" | "solve";
@@ -25,7 +26,8 @@ export interface StageArtifact {
   role: AgentRole;
   /** Artifact IDs this stage received as input. */
   parents: string[];
-  status: "submitted" | "missing" | "failed";
+  /** `replayed`: a saved clean output was used instead of running the stage. */
+  status: "submitted" | "replayed" | "missing" | "failed";
   content: unknown;
   sha256: string | null;
   error: string | null;
@@ -89,6 +91,7 @@ export type ProvenanceEvent =
   | { type: "stage_session"; id: string; sessionFile: string | null }
   | { type: "tool_call"; stageId: string; call: ToolCallRecord }
   | { type: "step_files"; stageId: string; segment: StepFileChanges }
+  | { type: "fault"; injection: FaultInjection }
   | { type: "stage_end"; artifact: StageArtifact }
   | { type: "run_end"; status: string; durationMs: number };
 

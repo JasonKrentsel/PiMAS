@@ -18,6 +18,11 @@ environment:
     PIMAS_NODE             node executable (default: node)
     PIMAS_SNAPSHOT_ROOT    directory tracked for per-stage file changes (default: /; "none" disables)
     PIMAS_RUN_SNAPSHOT     0 skips the whole-container manifests before and after the run (default: 1)
+    PIMAS_CONDITIONS       directory of per-task condition files, <task>.json, giving replayed stage
+                           outputs and at most one fault (default: none). A task without a file fails.
+    PIMAS_OFFLINE          1 disconnects the task container from its networks while the agent works, so
+                           it cannot fetch the upstream fix; they are reconnected for grading. Docker
+                           environments only; a container that still reaches the internet fails the trial.
 
 Everything a trial produces is under its ``agent/pimas/`` folder; see pimas_harbor/README.md.
 
@@ -28,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import shlex
@@ -71,7 +77,21 @@ class PimasAgent(BaseAgent):
             "max_corrections": self._setting("PIMAS_MAX_CORRECTIONS", "1"),
             "snapshot_root": self._setting("PIMAS_SNAPSHOT_ROOT", "/"),
             "run_snapshot": self._setting("PIMAS_RUN_SNAPSHOT", "1"),
+            "conditions": self._setting("PIMAS_CONDITIONS", ""),
+            "offline": self._setting("PIMAS_OFFLINE", "0"),
         }
+
+    def _condition_file(self) -> Path | None:
+        """This trial's condition file; the trial directory is named <task>__<suffix>."""
+        directory = self._settings()["conditions"]
+        if not directory:
+            return None
+        task = self.logs_dir.parent.name.rsplit("__", 1)[0]
+        file = Path(directory).resolve() / f"{task}.json"
+        if not file.is_file():
+            # Never fall back to an unfaulted run inside a fault condition.
+            raise FileNotFoundError(f"No condition file for task {task}: {file}")
+        return file
 
     def _paths(self) -> tuple[Path, Path, Path]:
         root = Path(self._setting("PIMAS_ROOT", str(REPO_ROOT / "PiMAS"))).resolve()
@@ -95,6 +115,9 @@ class PimasAgent(BaseAgent):
         ]
         if settings["review"] not in ("0", "false", "False"):
             command.append("--review")
+        condition = self._condition_file()
+        if condition:
+            command += ["--condition", str(condition)]
         return command, root
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
@@ -117,6 +140,7 @@ class PimasAgent(BaseAgent):
             "started_at": now(),
             "code": code_identity(root),
             "settings": settings,
+            "condition": _file_identity(self._condition_file()),
             "bridge_command": command,
             "config": snapshot_config(state, models, agents),
             "workspace_cwd": cwd,
@@ -130,6 +154,17 @@ class PimasAgent(BaseAgent):
                 info["filesystem_start"] = await filesystem.start()
             except Exception as error:  # noqa: BLE001 - tracking must not stop the task attempt
                 info["filesystem_start"] = {"ok": False, "error": f"{type(error).__name__}: {error}"}
+
+        offline = _Offline(environment) if settings["offline"] not in ("0", "false", "False") else None
+        if offline:
+            try:
+                info["network"] = await offline.start()
+            except Exception as error:
+                # Never let an offline condition run online; put back whatever was disconnected.
+                info["network"] = {"error": f"{type(error).__name__}: {error}", **await offline.restore()}
+                write_run_info(state, info)
+                raise
+            write_run_info(state, info)
 
         stderr = (state / "bridge-stderr.txt").open("ab")
         process = await asyncio.create_subprocess_exec(
@@ -153,7 +188,11 @@ class PimasAgent(BaseAgent):
             stderr.close()
             info["bridge_exit_code"] = process.returncode
             info["bridge_finished"] = finished
+            info["bridge_status"] = relay.done_status
             info["agent_finished_at"] = now()
+            if offline:
+                # Before anything else: grading needs the network back (it reinstalls the package).
+                info["network"].update(await offline.restore())
             if filesystem:
                 try:
                     info["filesystem"] = await filesystem.finish()
@@ -162,6 +201,9 @@ class PimasAgent(BaseAgent):
             info["finished_at"] = now()
             write_run_info(state, info)
             self._populate(state, context)
+        if relay.done_status in (None, "error"):
+            # A pipeline that never ran (bad config, missing tool) must not be graded as a model failure.
+            raise RuntimeError(f"PiMAS bridge ended with status {relay.done_status!r}; see {state / 'bridge-stderr.txt'}")
 
     def _populate(self, state: Path, context: AgentContext) -> None:
         events = read_events(state / "provenance.jsonl")
@@ -178,6 +220,12 @@ class PimasAgent(BaseAgent):
         self._populate(self.logs_dir / "pimas", context)
 
 
+def _file_identity(file: Path | None) -> dict[str, str] | None:
+    if file is None:
+        return None
+    return {"file": str(file), "sha256": hashlib.sha256(file.read_bytes()).hexdigest()}
+
+
 class _Relay:
     """Runs the bridge's exec requests in the task container, concurrently, until `done`."""
 
@@ -186,6 +234,7 @@ class _Relay:
         self.environment = environment
         self.has_timeout = has_timeout
         self.tasks: dict[int, asyncio.Task[None]] = {}
+        self.done_status: str | None = None
         self.write_lock = asyncio.Lock()
 
     async def send(self, message: dict[str, Any]) -> None:
@@ -210,6 +259,7 @@ class _Relay:
                 if task:
                     task.cancel()
             elif kind == "done":
+                self.done_status = str(message.get("status"))
                 return
             else:
                 raise RuntimeError(f"Unexpected bridge message: {kind!r}")
@@ -247,6 +297,57 @@ class _Relay:
         if self.tasks:
             await asyncio.gather(*self.tasks.values(), return_exceptions=True)
         self.tasks.clear()
+
+
+# Succeeds only if the container can resolve a name or reach a public address.
+OFFLINE_PROBE = "timeout 8 bash -c 'exec 3<>/dev/tcp/pypi.org/443' || timeout 8 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443'"
+
+
+class _Offline:
+    """Disconnects the task's main container from its docker networks, and later reconnects them."""
+
+    def __init__(self, environment: BaseEnvironment):
+        self.environment = environment
+        self.container = ""
+        self.networks: dict[str, list[str]] = {}
+
+    async def start(self) -> dict[str, Any]:
+        from harbor.environments.docker.docker import _sanitize_docker_compose_project_name
+
+        project = _sanitize_docker_compose_project_name(self.environment.session_id)
+        found = (await _docker("ps", "-q", "--filter", f"label=com.docker.compose.project={project}",
+                               "--filter", "label=com.docker.compose.service=main")).split()
+        if len(found) != 1:
+            raise RuntimeError(f"expected one main container in compose project {project}, found {len(found)}")
+        self.container = found[0]
+        attached = json.loads(await _docker("inspect", "-f", "{{json .NetworkSettings.Networks}}", self.container))
+        for name, endpoint in attached.items():
+            await _docker("network", "disconnect", name, self.container)
+            self.networks[name] = [alias for alias in endpoint.get("Aliases") or [] if not self.container.startswith(alias)]
+        probe = await self.environment.exec(OFFLINE_PROBE, timeout_sec=60)
+        if probe.return_code == 0:
+            raise RuntimeError("the container still reaches the internet")
+        return {"offline": True, "container": self.container, "disconnected": list(self.networks),
+                "probe_exit_code": probe.return_code}
+
+    async def restore(self) -> dict[str, Any]:
+        restored, errors = [], []
+        for name, aliases in self.networks.items():
+            try:
+                await _docker("network", "connect", *[f"--alias={alias}" for alias in aliases], name, self.container)
+                restored.append(name)
+            except Exception as error:  # noqa: BLE001 - record it; grading then runs offline and is flagged
+                errors.append(f"{name}: {error}")
+        return {"reconnected": restored, "reconnect_errors": errors}
+
+
+async def _docker(*args: str) -> str:
+    process = await asyncio.create_subprocess_exec(
+        "docker", *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    out, err = await process.communicate()
+    if process.returncode:
+        raise RuntimeError(f"docker {' '.join(args)} failed: {err.decode().strip()}")
+    return out.decode()
 
 
 async def _stop(process: asyncio.subprocess.Process, finished: bool) -> None:

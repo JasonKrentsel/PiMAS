@@ -91,6 +91,41 @@ class AgentRelayTest(unittest.TestCase):
             self.assertTrue((state / "config/prompts/researcher.md").read_text().startswith("You are the research agent"))
             self.assertEqual(json.loads((state / "config/models.json").read_text())["providers"]["vllm"]["apiKey"], "unused")
 
+    def test_a_bridge_that_fails_to_start_fails_the_trial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            bridge = root / "bridge"
+            bridge.write_text("#!/bin/sh\necho 'Cannot find package tsx' >&2\nexit 1\n")
+            bridge.chmod(bridge.stat().st_mode | stat.S_IEXEC)
+            agent = PimasAgent(logs_dir=root / "logs", model_name="m", extra_env={
+                "PIMAS_NODE": str(bridge), "PIMAS_ROOT": tmp, "PIMAS_RUN_SNAPSHOT": "0",
+                "PIMAS_MODELS": str(REPO / "config.example/pipeline/models.json"),
+                "PIMAS_AGENTS": str(REPO / "config.example/pipeline/agents.json"),
+            })
+            (root / "logs").mkdir()
+            with self.assertRaisesRegex(RuntimeError, "status None"):
+                asyncio.run(agent.run("Do the task.", LocalEnvironment(root / "app"), AgentContext()))
+            info = json.loads((root / "logs/pimas/run-info.json").read_text())
+            self.assertEqual((info["bridge_exit_code"], info["bridge_status"]), (1, None))
+
+    def test_condition_files_are_chosen_per_task_and_a_missing_one_fails_the_trial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conditions = root / "conditions"
+            conditions.mkdir()
+            (conditions / "org__repo-1.json").write_text('{"source": "s", "replay": {}, "fault": null}')
+            env = {"PIMAS_ROOT": tmp, "PIMAS_CONDITIONS": str(conditions)}
+            # Harbor names trial folders <task>__<suffix> and gives the agent <trial>/agent.
+            found = PimasAgent(logs_dir=root / "org__repo-1__AbC123" / "agent", model_name="m", extra_env=env)
+            command, _ = found._bridge_command(root / "state")
+            self.assertEqual(command[command.index("--condition") + 1], str((conditions / "org__repo-1.json").resolve()))
+            missing = PimasAgent(logs_dir=root / "org__repo-2__XyZ789" / "agent", model_name="m", extra_env=env)
+            with self.assertRaises(FileNotFoundError):
+                missing._bridge_command(root / "state")
+            plain = PimasAgent(logs_dir=root / "org__repo-2__XyZ789" / "agent", model_name="m", extra_env={"PIMAS_ROOT": tmp})
+            self.assertNotIn("--condition", plain._bridge_command(root / "state")[0])
+
     def test_run_filesystem_records_manifests_and_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -1,8 +1,9 @@
 import { createInterface } from "node:readline";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { loadAgentConfig } from "./agent-config.js";
+import { parseCondition } from "./faults.js";
 import { runPipeline, type PipelineResult } from "./pipeline.js";
 import type { ExecResult, Workspace } from "./workspace.js";
 
@@ -61,6 +62,8 @@ async function main(send: Send): Promise<PipelineResult> {
     "max-corrections": { type: "string", default: "1" },
     // Directory tracked for per-stage file changes inside the workspace; "none" disables it.
     "snapshot-root": { type: "string", default: "/" },
+    // JSON file with replayed stage outputs and at most one fault; see src/faults.ts.
+    condition: { type: "string" },
   } });
   if (!values.models || !values.agents || !values.state) throw new Error("Provide explicit --models, --agents, and --state");
   if (values.mode !== "pipeline" && values.mode !== "single") throw new Error("--mode must be pipeline or single");
@@ -69,6 +72,8 @@ async function main(send: Send): Promise<PipelineResult> {
   const state = path.resolve(values.state);
   await mkdir(state, { recursive: true });
   const { roles } = await loadAgentConfig(path.resolve(values.agents));
+  // Parsed before the task arrives, so a bad condition file fails the trial instead of running it clean.
+  const condition = values.condition ? parseCondition(JSON.parse(await readFile(path.resolve(values.condition), "utf8"))) : undefined;
 
   const pending = new Map<number, PendingExec>();
   let task: { prompt: string; cwd: string } | undefined;
@@ -132,6 +137,7 @@ async function main(send: Send): Promise<PipelineResult> {
       review: values.review,
       maxCorrections,
       snapshotRoot: values["snapshot-root"] === "none" ? null : values["snapshot-root"],
+      ...(condition ? { condition } : {}),
       signal: controller.signal,
     });
     await writeFile(path.join(state, "summary.json"), JSON.stringify(result, null, 2) + "\n");
