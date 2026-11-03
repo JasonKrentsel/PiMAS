@@ -4,6 +4,9 @@ Phase 1 injects one controlled fault per run into the fixed-stage pipeline (rese
 measures whether the fault spread, what it cost, and how a full restart and always-verify compare. It runs on the
 19 tasks that passed 3/3 in the [clean baseline](../swe-bench-baseline/README.md) (`tasks-19.txt`).
 
+The result tables are in `results/`: `summary.md` (every condition), `runs.csv` (one row per run), `verify-plan.md`,
+`failing-tests.md` and `memorization-probe.json`. `analyze.py` rebuilds them from the run folders in `jobs/phase1/`.
+
 ## How a run is controlled
 
 Each condition is a folder of per-task files, `conditions/<condition>/<task>.json`, made by `make_conditions.py`
@@ -35,7 +38,7 @@ patch are copied in only for grading. `run-info.json` records the network state 
 code or tools, and asks for the merged patch. It named the right file in 14 of 19 tasks but reproduced 6% of the
 gold patches' added lines that the issue does not already quote (2 of 16 tasks at half or more, both where the
 issue spells the fix out); its one-line fix for `sympy-23534` is wrong. The agents find the fixes by reading the
-code, not by recalling them (results in `jobs/phase1-memorization/probe.json`).
+code, not by recalling them (results in `results/memorization-probe.json`).
 
 Each injection is logged: a `fault` event in `provenance.jsonl`, holding the original content, the delivered
 content, the stage, the step and the tool-call ID (and, for a mutated edit, the changed line). `summary.json` keeps
@@ -151,8 +154,8 @@ Start the model server first (`../swe-bench-baseline/scripts/serve-vllm.sh`). Th
 K=2 ./run.sh control-rp            # writes jobs/phase1/control-rp
 K=2 ./run.sh tool-timeout
 K=1 ./run.sh tool-timeout verify   # always-verify: reviewer + one correction, jobs/phase1/tool-timeout+verify
-python3 -I analyze.py ../../jobs/phase1/report ../../jobs/phase1/*
-python3 -I verify_plan.py ../../jobs/phase1/report   # which conditions get the always-verify comparison
+python3 -I analyze.py results ../../jobs/phase1/*
+python3 -I verify_plan.py results   # which conditions get the always-verify comparison
 ```
 
 **Where always-verify is compared.** Verifying is run only where the comparison means something, by a rule fixed
@@ -163,7 +166,7 @@ repeat it unchanged; this is why the persistent test faults (`tool-false-fail-al
 is execute timeouts, are not verified. This clause was added after their first runs showed that pattern. With one harmed run a
 verify comparison could not tell recovery from chance, and where nothing was harmed verifying can only add cost,
 which is measured on the paired control. Every control paired with a verified condition is verified as well, as
-the cost of verifying when nothing is wrong (and the reviewer's false-alarm rate). `report/verify-plan.md` lists
+the cost of verifying when nothing is wrong (and the reviewer's false-alarm rate). `results/verify-plan.md` lists
 every condition with its reason. The verify runs use the same load as the runs they are compared with (two queues
 of 4), so agent minutes compare; tokens and tool calls do not depend on load.
 

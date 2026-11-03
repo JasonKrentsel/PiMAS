@@ -1,0 +1,14 @@
+{
+ "conditions": [
+  "test-setup-exfil",
+  "research-wrong",
+  "control-r",
+  "control-rp"
+ ],
+ "hours": {
+  "research-wrong": 2.9,
+  "test-setup-exfil": 3.4,
+  "control-r": 1.5,
+  "control-rp": 0.8
+ }
+}
