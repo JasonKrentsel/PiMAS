@@ -335,7 +335,7 @@ def summarize(rows: list) -> str:
              "| Condition | Verify | Class | Entry | Runs | Audit issues | Injected | Hits/run | Used | Pass | Graded | Finished | Unfixed | Regressed | "
              "F2P tests passed | P2P tests passed | Pass if used | Δ pass vs control | "
              "Corruption kept | Complied | Reported | Outside writes | Network | Tests deleted/skipped | Agent min | Out tokens | "
-             "Calls after fault | Restart: pass, extra min |",
+             "Calls after fault | Restart: pass, extra cost per failed run |",
              "|" + "---|" * 28]
     for (name, verify), runs in sorted(groups.items()):
         first, flagged = runs[0], sum(bool(r["audit"]) for r in runs)
@@ -448,20 +448,35 @@ def restart_numbers(runs, clean, control, rows):
 
 def restart_estimate(runs, clean, control, rows):
     """Full restart after a failed run: one clean rerun of the task. Success is the control's pass rate on
-    that task; the extra time is the control's mean agent time on it, added to the failed run."""
+    that task; the extra cost is the control's mean minutes and tokens on it, added to the failed run. The paired
+    control replays saved upstream stages, so a restart from scratch, which reruns research and plan too, is also
+    given, from control-full."""
     failed = [r for r in runs if r["resolved"] != 1]
     if not failed:
         return "no failures"
-    minutes = defaultdict(list)
-    for r in rows:
-        if r["condition"] == control and r["agent_min"] is not None:
-            minutes[r["task"]].append(r["agent_min"])
     passes = [statistics.mean(clean[(control, r["task"])]) for r in failed if clean.get((control, r["task"]))]
-    extra = [statistics.mean(minutes[r["task"]]) for r in failed if minutes.get(r["task"])]
     if not passes:
         return "no control"
     total = sum(r["resolved"] == 1 for r in runs) + sum(passes)
-    return f"{total:.1f}/{len(runs)}, +{statistics.mean(extra):.0f} min" if extra else f"{total:.1f}/{len(runs)}"
+    text = f"{total:.1f}/{len(runs)}, " + restart_cost(failed, control, rows)
+    if control != "control-full":
+        text += "; from scratch " + restart_cost(failed, "control-full", rows)
+    return text
+
+
+def restart_cost(failed, control, rows):
+    """Mean extra minutes, output and input tokens per failed run when it is rerun as the given control."""
+    per_task = defaultdict(lambda: defaultdict(list))
+    for r in rows:
+        if r["condition"] == control and not r.get("verify"):
+            for key in ("agent_min", "out_tokens", "in_tokens"):
+                if r[key] is not None:
+                    per_task[r["task"]][key].append(r[key])
+    def extra(key):
+        values = [statistics.mean(per_task[r["task"]][key]) for r in failed if per_task[r["task"]][key]]
+        return statistics.mean(values) if values else 0
+    return (f"+{extra('agent_min'):.0f} min, +{extra('out_tokens') / 1e3:.0f}K out, "
+            f"+{extra('in_tokens') / 1e6:.2f}M in")
 
 
 def main() -> None:

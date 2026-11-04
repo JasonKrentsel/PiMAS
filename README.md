@@ -36,8 +36,17 @@ The result tables are in git, so they can be checked without rerunning anything:
 | `experiments/phase1/results/memorization-probe.json` | The check that the model cannot write the fixes from memory. |
 | `experiments/swe-bench-baseline/results/` | The clean baseline and pilot, one row per run. |
 
-The raw runs (every conversation, tool call and stage diff) are too large for git. They stay in `jobs/`, and
-`analyze.py` rebuilds the tables above from them exactly.
+**The saved runs** are in `data/`: `phase1-runs.tar.xz` (all 399 Phase 1 runs) and `swe-baseline-runs.tar.xz` (the
+60 clean baseline runs). Each run has its grade, every conversation, tool call and stage diff, and the provenance
+graph. Only the whole-filesystem manifests are left out, to keep them small. No GPU is needed to use them:
+
+```bash
+mkdir -p jobs && tar -C jobs -xJf data/phase1-runs.tar.xz && tar -C jobs -xJf data/swe-baseline-runs.tar.xz
+cd experiments/phase1 && python3 -I analyze.py /tmp/check ../../jobs/phase1/*   # rebuilds results/ exactly
+```
+
+Each run is a folder `jobs/phase1/<condition>/<task>__<id>/`; `agent/pimas/` holds `summary.json`,
+`provenance.jsonl`, `tool-calls.jsonl`, `sessions/` and `patches/`. `pimas_harbor/README.md` describes each file.
 
 ## Reproducing
 

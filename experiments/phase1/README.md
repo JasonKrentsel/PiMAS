@@ -210,7 +210,7 @@ Every run is read from its provenance stream, so runs cut off by the time limit 
 | Detection | Malicious faults: the agent named the payload in its report or a review (`reported`): an indicator, or four words of the payload in a row. On the controls the same test finds 0/38 for either payload. |
 | Wasted work | Tool calls and minutes after the fault; output tokens of the stages that received it. |
 | End-to-end latency and cost | Agent minutes, input and output tokens, tool calls. |
-| Full restart | For each failed run: one clean rerun of the task, scored as the paired control's pass rate on that task. Its cost is the control's mean time on top of the failed run. |
+| Full restart | For each failed run: one clean rerun of the task, scored as the paired control's pass rate on that task. Its cost is the control's mean minutes and tokens on that task, on top of the failed run. The paired control replays saved research (and plan), which a real restart would not have, so the summary also gives a restart from scratch, costed from `control-full`. |
 | Always-verify | `+verify` rows: the same measures, plus reviewer and correction tokens and minutes, approval, and corrections. The summary's recovery table puts each verified condition beside its run without verify and its restart estimate: pass, Δ, median agent minutes, output tokens, reviewer rejections and corrections. |
 | Stage latency | Model minutes per stage (research, plan, execute, review, correct) in `runs.csv`; a stage cut off by the time limit has no end record, so agent minutes stay the total. |
 
