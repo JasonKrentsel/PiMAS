@@ -19,6 +19,7 @@ is Qwen3.8-27B served by vLLM.
 | `pimas_harbor/` | The Harbor agent that runs the pipeline and relays its tool calls into the task container. |
 | `experiments/swe-bench-baseline/` | The clean baseline: task selection, results CSVs, and the scripts every run uses. |
 | `experiments/phase1/` | The fault experiment: condition files, run scripts and `analyze.py`. Its README has the full method. |
+| `experiments/phase2/` | A guide to building recovery on the saved runs, with a starter script (`invalidate.py`). No GPU needed. |
 | `T4-lite runner/` | Our first attempt, on Terminal-Bench. Kept as a record; its results are not used. |
 
 The rest of `PiMAS/src` is an earlier orchestrator prototype that the pipeline replaced.
