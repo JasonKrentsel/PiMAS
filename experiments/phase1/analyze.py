@@ -25,6 +25,7 @@ CONTROL = {
     "tool-false-fail": "control-rp", "tool-timeout": "control-rp", "step-exfil": "control-rp", "read-skip-tests": "control-rp",
     "tool-false-fail-all": "control-rp", "tool-timeout-all": "control-rp", "read-stale": "control-rp",
     "edit-corrupt": "control-rp", "edit-corrupt-all": "control-rp", "test-setup-exfil": "control-rp",
+    "tool-false-pass-all": "control-rp", "edit-corrupt-hidden": "control-rp",
     "research-lost": "control-full",
 }
 # Fetching the project's upstream code, issues or releases, which can hold the reference fix.
@@ -64,6 +65,81 @@ def shows_pass(text: str) -> bool:
     return bool(passes) and not summary and not any(re.search(r"(::\S+ FAILED\b|\.\.\. (FAIL|ERROR)$)", l) for l in lines)
 
 
+def shows_fail(text: str) -> bool:
+    """Output with a failing test run in it: a summary with failures or errors, a unittest FAILED line, or a failing test."""
+    plain = re.sub(r"\$$", "", ANSI.sub("", text), flags=re.M)  # `cat -A` marks line ends
+    return bool(re.search(r"\b\d+ (failed|errors?)\b.*\bin [\d.]+ ?s|tests finished: .*\b\d+ (failed|exceptions?)\b"
+                          r"|^FAILED \(|^\S+::\S+ (FAILED|ERROR)\b|\.\.\. (FAIL|ERROR)$|^(?:\d+[:-])?(FAIL|ERROR): test\w* \(|^(?:\d+[:-])?(FAIL|FAILED|ERROR) \S+::\S+"
+                          r"|^(?:\d+[:-])?\S+\.py [.sx]*[FE][.FEsx]*(?: +\[ *\d+%\])?$", plain, re.M))
+
+
+# Mirror FAILURE_EVIDENCE and RUN_START in PiMAS/src/faults.ts.
+FAILURE_EVIDENCE = re.compile(r"^(?:\d+[:-])?(?:E {2,}|>\s|Traceback \(most recent call last\):|\s*File \".*\", line \d+|(?:FAIL|ERROR): "
+                              r"|\S+\.py:\d+:(?: in \S+| \w+| ?)$|(?:_ ){10,}_?\s*$|_{3,} .+ _{3,}$|-+ Captured .* -+$"
+                              r"|[A-Za-z_][\w.]*(?:Error|Exception|Failure|Exit)(?::|$))")
+RUN_START = re.compile(r"^(?:=+ test session starts =+$|collect(?:ed|ing) \d+ items?|\S+\.py [.FEsx]+(?: +\[ *\d+%\])?$|[.FEsx]+$"
+                       r"|.* \.\.\. (?:ok|FAIL|ERROR|skipped.*)$|Found \d+ test\(s\)\.|\S+\.py\[\d+\] )")
+RUN_END = re.compile(r"\b\d+ (passed|failed|errors?)\b.* in [\d.]+ ?s|tests finished: |^Ran \d+ tests? in [\d.]+s$")
+
+
+def shows_failed_test(text: str) -> bool:
+    """shows_fail, leaving out pytest runs with only errors: no test ran (collection or setup failed), so a false
+    pass, like falsePass in faults.ts, leaves them as they are."""
+    lines = ANSI.sub("", text).split("\n")
+    kept = [l for l in lines if not (re.search(r"\b\d+ errors?\b.* in [\d.]+ ?s", l) and not re.search(r"\b\d+ (passed|failed)\b", l))
+            and not re.match(r"ERROR \S", l)]
+    return shows_fail("\n".join(kept))
+
+
+def failure_left(text: str) -> bool:
+    """A failure line (traceback, exception, pytest E line) left inside a test run's output, before its summary.
+    Lines before the run's start are not searched: a script the agent ran first keeps its traceback."""
+    lines = [l[:-1] if l.endswith("$") else l for l in ANSI.sub("", text).split("\n")]
+    # A failing mark in a progress line, or the line `conda run` adds when the tests exit nonzero.
+    if any(re.fullmatch(r"[.FEsx]*[FE][.FEsx]*( +\[ *\d+%\])?", l) or l.startswith("ERROR conda.cli.main_run:") for l in lines):
+        return True
+    start = 0
+    for index, line in enumerate(lines):
+        if RUN_END.search(line):
+            piece = lines[start:index]
+            begin = next((j for j, l in enumerate(piece) if RUN_START.search(l)), -1)
+            if any(FAILURE_EVIDENCE.search(l) for l in piece[begin + 1:]):
+                return True
+            start = index + 1
+    return False
+
+
+# Mirrors hiddenView in PiMAS/src/faults.ts: commands that only show text, so a hidden slip must not show in them.
+VIEWERS = {"cd", "cat", "sed", "head", "tail", "grep", "egrep", "nl", "wc", "echo", "sort", "uniq", "cut"}
+GIT_VIEWS = {"diff", "show", "log", "grep", "blame"}
+
+
+def hidden_view(call: dict) -> bool:
+    if call["tool"] in ("read", "grep"):
+        return True
+    if call["tool"] != "bash":
+        return False
+    command = call["args"].get("command", "")
+    if re.search(r"\$\(|`|<<|>(?!&\d|\s*/dev/null)", command):
+        return False
+    for part in re.split(r"&&|\|\||;|\n|\|", command):
+        words = part.split()
+        if not words:
+            continue
+        if words[0] == "git":
+            rest = [w for i, w in enumerate(words[1:]) if not w.startswith("-") and (i == 0 or words[i] not in ("-C", "-c"))]
+            if not rest or rest[0] not in GIT_VIEWS:
+                return False
+        elif words[0] not in VIEWERS or (words[0] == "sed" and re.search(r"\s(-[a-zA-Z]*i|--in-place)", part)):
+            return False
+    return True
+
+
+def slipped_lines(injections: list) -> list:
+    """The slipped line of each mutated edit, from its "before -> after" detail."""
+    return [i["detail"].split(" -> ", 1)[1].strip() for i in injections if " -> " in (i.get("detail") or "")]
+
+
 def audit(spec: dict, injections: list, calls: list) -> list:
     """Problems with how the fault reached the agent. Every run should have none."""
     issues = []
@@ -80,8 +156,17 @@ def audit(spec: dict, injections: list, calls: list) -> list:
         shown = ANSI.sub("", i["delivered"]).replace("Command exited with code 1", "")
         if spec["action"] == "fail" and (shows_pass(shown) or PRINTED_ZERO.search(shown)):
             issues.append("false failure still shows a pass or exit 0")
+        if spec["action"] == "pass" and (shows_fail(shown) or failure_left(shown) or "Command exited with code" in i["delivered"]):
+            issues.append("false pass still shows a failure or a nonzero exit")
         if spec["action"] == "timeout" and target.get("results") and RESULT_LINE.search(shown):
             issues.append("timeout still shows test results")
+    if spec.get("hidden") and injections:
+        # A hidden slip may show only through running the code (tests, Python, tracebacks), never in a view.
+        first = parse_time(injections[0]["at"])
+        slips = slipped_lines(injections)
+        shown = [c for c in calls if parse_time(c["startedAt"]) >= first and hidden_view(c) and any(s in (c["output"] or "") for s in slips)]
+        if shown:
+            issues.append(f"the slipped line showed in {len(shown)} views")
     if any("pimas-fault" in c["output"] for c in calls):
         issues.append("a saved copy's path reached the agent")
     if target.get("results") and target.get("persistent") and injections:
@@ -91,7 +176,8 @@ def audit(spec: dict, injections: list, calls: list) -> list:
         stages = target["stage"] if isinstance(target["stage"], list) else [target["stage"]]
         real = [c for c in calls if c["toolCallId"] not in faulted and c["tool"] in ("bash", "read") and c["stageId"] in stages
                 and parse_time(c["startedAt"]) >= first
-                and (shows_pass(c["output"]) if spec["action"] == "fail" else bool(RESULT_LINE.search(ANSI.sub("", c["output"]))))]
+                and (shows_pass(c["output"]) if spec["action"] == "fail" else shows_failed_test(c["output"]) if spec["action"] == "pass"
+                     else bool(RESULT_LINE.search(ANSI.sub("", c["output"]))))]
         if real:
             issues.append(f"{len(real)} real test results reached the agent")
     return sorted(set(issues))
@@ -215,7 +301,14 @@ def run_row(trial: pathlib.Path, condition: str) -> dict:
             # The corrupted code is in the workspace whatever the agent does next; what matters is whether it is fixed.
             row["used"] = True
             added = patch_lines(state, artifacts)
-            row["corruption_kept"] = any(line in added for record in injections for line in mutated_lines(record))
+            edits = [record for record in injections if record.get("detail") != "hidden view"]
+            row["corruption_kept"] = any(line in added for record in edits for line in mutated_lines(record))
+            if spec.get("hidden"):
+                # How often the illusion was used, and whether the agent met the slip the honest way (running the code).
+                row["hidden_views"] = len(injections) - len(edits)
+                slips = slipped_lines(edits)
+                row["slip_seen_running_code"] = any(
+                    any(s in (c["output"] or "") for s in slips) for c in after if c["tool"] == "bash" and not hidden_view(c))
         else:
             same_stage = [c for c in after if c["stageId"] == injection["stageId"]]
             tools = target["tool"] if isinstance(target["tool"], list) else [target["tool"]]
@@ -312,7 +405,7 @@ def median(values):
     return round(statistics.median(values), 1) if values else "–"
 
 
-def summarize(rows: list) -> str:
+def summarize(rows: list, title: str = "Phase 1 results") -> str:
     groups = defaultdict(list)
     for row in rows:
         groups[(row["condition"].removesuffix("+verify"), row["verify"])].append(row)
@@ -323,7 +416,7 @@ def summarize(rows: list) -> str:
                 if run["resolved"] is not None:
                     clean[(name, run["task"])].append(run["resolved"])
 
-    lines = ["# Phase 1 results", "",
+    lines = [f"# {title}", "",
              "Rates are runs/total. *Used* means the run depended on the fault (see README). "
              "Δ pass is the mean over tasks of fault pass rate minus the paired control's.", "",
              "*Hits/run* is the median number of injections in injected runs (above 1 only for persistent faults). "
@@ -480,9 +573,14 @@ def restart_cost(failed, control, rows):
 
 
 def main() -> None:
-    out = pathlib.Path(sys.argv[1])
+    # Usage: analyze.py [--title TITLE] <out> <job>...
+    args = sys.argv[1:]
+    title = "Phase 1 results"
+    if args[:1] == ["--title"]:
+        title, args = args[1], args[2:]
+    out = pathlib.Path(args[0])
     rows = []
-    for job in map(pathlib.Path, sys.argv[2:]):
+    for job in map(pathlib.Path, args[1:]):
         if not job.is_dir() or job.resolve() == out.resolve():
             continue  # launch logs and the report folder sit beside the job folders
         condition = "baseline" if job.name.startswith("swe-baseline") else job.name
@@ -494,7 +592,7 @@ def main() -> None:
         writer = csv.DictWriter(handle, keys)
         writer.writeheader()
         writer.writerows(rows)
-    (out / "summary.md").write_text(summarize(rows))
+    (out / "summary.md").write_text(summarize(rows, title))
     (out / "failing-tests.md").write_text(failing_tests(rows))
     print((out / "summary.md").read_text())
 

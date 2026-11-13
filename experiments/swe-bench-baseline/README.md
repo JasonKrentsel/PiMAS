@@ -143,6 +143,7 @@ snapshot, which belongs in the recovery mechanism.
 | `scripts/env.sh` | Paths and cache locations; source first. Everything defaults to the repository's `.local/`. |
 | `scripts/serve-vllm.sh` | The vLLM server command. |
 | `scripts/launch.sh`, `scripts/watch.sh` | Run a Harbor job with a disk guard, and log progress every 5 minutes. |
+| `scripts/image-janitor.sh` | Optional, for a nearly full disk: removes SWE-bench task images pulled during a sweep once no container or trial uses them (`image-janitor.sh <log> <pid>...`, runs until the given processes exit). Images present before it started are kept. |
 | `scripts/report.py`, `scripts/network-use.py`, `scripts/select-baseline.py` | Build the CSVs and tables above, and pick the baseline tasks. |
 
 ## Reproducing

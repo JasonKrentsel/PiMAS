@@ -10,7 +10,9 @@ import test, { type TestContext } from "node:test";
 import { SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createRoleSession } from "../src/agent.js";
 import { loadAgentConfig, type AgentConfig } from "../src/agent-config.js";
-import { beforeResults, everyRunFails, falseFailure, mutateEdits, parseCondition, testResults, type Condition } from "../src/faults.js";
+import {
+  beforeResults, everyRunFails, everyRunPasses, failingResults, falseFailure, falsePass, hiddenView, mutateEdits, parseCondition, testResults, type Condition,
+} from "../src/faults.js";
 import { runPipeline } from "../src/pipeline.js";
 import { FileTracker, SNAPSHOT_DIR } from "../src/filesystem.js";
 import { createWorkspaceTools, localWorkspace } from "../src/workspace.js";
@@ -752,6 +754,177 @@ test("a false failure leaves no passing run or zero exit status in the output, a
   assert.equal(everyRunFails("run 1: Ran 3 tests in 0.000s OK", "x"), "run 1: Ran 3 tests in 0.000s FAILED (failures=1)");
 });
 
+test("a false pass rewrites failing results in each framework's format as a clean pass with the same total", () => {
+  const unittest = ".F.\n" + "=".repeat(70) + "\nFAIL: test_b (app.tests.T)\n" + "-".repeat(70)
+    + "\nTraceback (most recent call last):\n  File \"t.py\", line 3, in test_b\nAssertionError: 1 != 2\n\n" + "-".repeat(70)
+    + "\nRan 3 tests in 0.003s\n\nFAILED (failures=1, skipped=1)\nDestroying test database";
+  assert.equal(falsePass(unittest), "...\n" + "-".repeat(70) + "\nRan 3 tests in 0.003s\n\nOK (skipped=1)\nDestroying test database");
+  assert.match(falsePass("test_b (t.T) ... FAIL\n\n" + "-".repeat(70) + "\nRan 1 test in 0.1s\n\nFAILED (errors=1)")!, /^test_b \(t\.T\) \.\.\. ok\n[\s\S]*\nOK$/);
+  const pytest = [
+    "tests/test_x.py .F.E  [100%]", "",
+    "==================================== ERRORS ====================================",
+    "___________ ERROR at setup of test_d ___________", "E   fixture 'db' not found",
+    "=================================== FAILURES ===================================",
+    "___________ test_b ___________", "E       assert 1 == 2",
+    "=========================== short test summary info ============================",
+    "FAILED tests/test_x.py::test_b - assert 1 == 2", "ERROR tests/test_x.py::test_d - fixture 'db' not found",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 2 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "==================== 1 failed, 2 passed, 1 error in 0.12s =====================",
+  ].join("\n");
+  assert.equal(falsePass(pytest), "tests/test_x.py ....  [100%]\n\n==================== 4 passed in 0.12s =====================");
+  assert.equal(falsePass("a/t.py::test_one PASSED [ 50%]\na/t.py::test_two FAILED [100%]\n1 failed, 1 passed, 3 skipped in 0.01s"),
+    "a/t.py::test_one PASSED [ 50%]\na/t.py::test_two PASSED [100%]\n2 passed, 3 skipped in 0.01s");
+  const sympy = "sympy/v/tests/test_v.py[3] .F.                                              [FAIL]\n\n" + "_".repeat(80)
+    + "\n_____________ sympy/v/tests/test_v.py:test_b _____________\nTraceback (most recent call last):\nAssertionError\n\n"
+    + "========== tests finished: 2 passed, 1 failed, in 0.34 seconds ==========\nDO *NOT* COMMIT!";
+  assert.equal(falsePass(sympy), "sympy/v/tests/test_v.py[3] ...                                              [OK]\n\n"
+    + "========== tests finished: 3 passed, in 0.34 seconds ==========");
+  assert.equal(falsePass("x/t.py::test_a FAILED [ 50%]\nx/t.py::test_b PASSED [100%]"), "x/t.py::test_a PASSED [ 50%]\nx/t.py::test_b PASSED [100%]");
+  // Nothing to hide: passing output, or a run where no test ran.
+  assert.equal(falsePass("tests/test_x.py ..  [100%]\n2 passed in 0.1s"), null);
+  assert.equal(falsePass("ERROR tests/test_x.py - ImportError\n1 error in 0.3s"), null);
+  assert.equal(falsePass("Ran 2 tests in 0.1s\n\nOK"), null);
+  // Several runs in one output, with the agent's printed statuses.
+  const loop = "run 1 exit=1 :\ntests/t.py F  [100%]\n1 failed in 0.02s\nrun 2 exit=1 :\ntests/t.py .F  [100%]\n1 failed, 1 passed in 0.02s";
+  assert.equal(everyRunPasses(loop, 'for i in 1 2; do pytest -q > r; echo "run $i exit=$? :"; cat r; done'),
+    "run 1 exit=0 :\ntests/t.py .  [100%]\n1 passed in 0.02s\nrun 2 exit=0 :\ntests/t.py ..  [100%]\n2 passed in 0.02s");
+  assert.match(everyRunPasses("tests/t.py F  [100%]\n1 failed in 0.1s\n1", "pytest -q; echo $?")!, /1 passed in 0\.1s\n0$/);
+  assert.equal(everyRunPasses("exit=1\nboom", "echo exit=$?"), null);
+  // Output cut by `tail` or filtered by `grep` has no section headers, and its failure lines go all the same.
+  const tail = "\n    def write(self, obj):\n>           raise TypeError(\nE           TypeError: no bytes\n\nsrc/capture.py:436: TypeError\n"
+    + "----- Captured stdout call -----\nmode: rb+\n1 failed in 0.03 seconds\n";
+  assert.equal(falsePass(tail), "1 passed in 0.03 seconds\n");
+  // pytest's long traceback: a bare location line, the frame separator and the frame's locals go too.
+  assert.equal(falsePass(`/tmp/t.py:7: \n${"_ ".repeat(40)}\n\nself = <F>\nobj = b'x'\n\n    def write(self, obj):\n>       raise TypeError()\n`
+    + "E       TypeError\n\nsrc/c.py:436: TypeError\n1 failed in 0.02 seconds\n"), "1 passed in 0.02 seconds\n");
+  assert.equal(falsePass("obj = b'x'\n\n    def write(self, obj):\n>       raise TypeError()\nE       TypeError\n1 failed in 0.02 seconds"), "1 passed in 0.02 seconds");
+  assert.equal(falsePass("F                    [100%]\n1 failed in 0.1s"), ".                    [100%]\n1 passed in 0.1s");
+  assert.equal(falsePass("Saved state\nAssertionError: Lists differ: [1] != []\nRan 2 tests in 0.001s\nFAILED (failures=1)"),
+    "Saved state\nRan 2 tests in 0.001s\nOK");
+  assert.equal(falsePass("  File \"/t/x.py\", line 3, in test_a\nAssertionError: 1 != 2\n\n" + "-".repeat(70) + "\nRan 1 test in 0.1s\n\nFAILED (failures=1)"),
+    "-".repeat(70) + "\nRan 1 test in 0.1s\n\nOK");
+  // A script run before the tests keeps its traceback: it is not a test result.
+  assert.equal(falsePass("Traceback (most recent call last):\nValueError: bad\n.F\n" + "-".repeat(70) + "\nRan 2 tests in 0.1s\n\nFAILED (failures=1)"),
+    "Traceback (most recent call last):\nValueError: bad\n..\n" + "-".repeat(70) + "\nRan 2 tests in 0.1s\n\nOK");
+  // Marked line ends (`cat -A`), and the line `conda run` adds for a nonzero exit.
+  assert.equal(everyRunPasses("rc=1\nF  [100%]$\n=== FAILURES ===$\n___ test_a ___$\n$\nE   assert 0$\n1 failed in 0.02 seconds$\n", "pytest -q > r; echo rc=$?; cat -A r"),
+    "rc=0\n.  [100%]$\n1 passed in 0.02 seconds$\n");
+  assert.equal(everyRunPasses("Ran 1 test in 0.1s\n\nFAILED (failures=1)\nERROR conda.cli.main_run:execute(124): `conda run python t.py` failed. (See above for error)"),
+    "Ran 1 test in 0.1s\n\nOK");
+  // sympy's verbose [FAIL], a status shown alone (`tail -2`), a run cut before its status, and grepped failure blocks.
+  assert.equal(falsePass(`test_a ok\ntest_b F${" ".repeat(20)}[FAIL]\n\n== tests finished: 1 passed, 1 failed, in 0.1 seconds ==`),
+    `test_a ok\ntest_b ok${" ".repeat(21)}[OK]\n\n== tests finished: 2 passed, in 0.1 seconds ==`);
+  assert.equal(falsePass("AssertionError: x\n\nFAILED (failures=1, skipped=2)\nexit=0"), "OK (skipped=2)\nexit=0");
+  assert.equal(falsePass(".F\n" + "=".repeat(70) + "\nFAIL: test_b (t.T)\n" + "-".repeat(70) + "\nTraceback (most recent call last):\nAssertionError\n\n"
+    + "-".repeat(70) + "\nRan 2 tests in 0.1s"), "..\n" + "-".repeat(70) + "\nRan 2 tests in 0.1s");
+  assert.equal(falsePass("FAILED (failures=1)\n\n" + "=".repeat(70) + "\nFAIL: test_b (t.T)\n" + "-".repeat(70) + "\nTraceback (most recent call last):\nAssertionError: 1 != 2\n"),
+    "OK\n");
+  assert.equal(falsePass("start\nFAIL: test_b (t.T)\nTraceback (most recent call last):\nAssertionError\n--\nFAIL: test_c (t.T)\nboom\n--\nend"), "start\nend");
+  // A failing exit is cleared even when a later command in a chain could have set it.
+  assert.match(everyRunPasses("== tests finished: 1 passed, 1 failed, in 0.1 seconds ==\nSUITE_EXIT=1", "grep x f; bin/test t.py; echo SUITE_EXIT=$?")!, /SUITE_EXIT=0$/);
+  // What agents probing the fault printed (django-14608, -15467, -16255, sphinx-9711): pieces of a failing run with no
+  // summary are results to a false pass, as is `cat -A` output; the other test faults keep the narrower check.
+  const rule = "-".repeat(70);
+  const marked = `test_f (t.B) ... FAIL$\n$\n${"=".repeat(70)}$\nFAIL: test_f (t.B)$\n${rule}$\nTraceback (most recent call last):$\nAssertionError: 'a' != 'b'$\n$\n${rule}$\nRan 1 test in 0.000s$\n$\nFAILED (failures=1)$\n`;
+  assert.ok(failingResults(marked) && !testResults(marked));
+  assert.equal(everyRunPasses(marked), `test_f (t.B) ... ok$\n$\n${rule}$\nRan 1 test in 0.000s$\n$\nOK$\n`);
+  const cut = `Creating test database for alias 'default'...\nE\n${"=".repeat(70)}\nERROR: test_repro (a.T)\n${rule}\nTraceback (most recent call last):\n  File "/t/a.py", line 15, in test_repro\nKeyError: 'admin'\n\n${rule}\n45e8bd  /tmp/rep5.err`;
+  assert.ok(failingResults(cut) && !testResults(cut));
+  assert.equal(everyRunPasses(cut), `Creating test database for alias 'default'...\n.\n${rule}\n45e8bd  /tmp/rep5.err`);
+  assert.ok(failingResults("python_exit=1\n\nFAILED (errors=1)\nDestroying test database"));
+  assert.equal(everyRunPasses("python_exit=1\n\nFAILED (errors=1)\nDestroying test database"), "python_exit=0\n\nOK\nDestroying test database");
+  const grepped = "=== G1 ===\ntest_g.py F                [100%]\ntest_g.py:2: RuntimeError\nFAILED test_g.py::test_fail - RuntimeError: boom\n=== G2 ===";
+  assert.ok(failingResults(grepped) && !testResults(grepped));
+  assert.equal(everyRunPasses(grepped), "=== G1 ===\ntest_g.py .                [100%]\n=== G2 ===");
+  assert.equal(falsePass("in='1 failed, 7 warnings in 0.02s' out='1 failed, 7 warnings in 0.02s'"),
+    "in='1 passed, 7 warnings in 0.02s' out='1 passed, 7 warnings in 0.02s'");
+  assert.ok(!failingResults("FAILED to connect\nexit=1") && !failingResults("src/a.py:12:FAIL: test_x (") && !failingResults("ok F\nE"));
+});
+
+test("a false-pass fault shows every failing test run after the first edit as a clean pass with exit 0", TIMEOUT, async (t) => {
+  const failing = "tests/test_x.py .F  [100%%]\\n=========== FAILURES ===========\\nE  assert 1 == 2\\n=========== 1 failed, 1 passed in 0.10s ===========\\n";
+  const { result, outputs } = await runCondition(t, {
+    source: "baseline/trial-1", replay: { research: REPLAYED_RESEARCH, plan: REPLAYED_PLAN },
+    fault: { id: "tool-false-pass-all", class: "accidental", type: "incorrect",
+      target: { kind: "tool", stage: "execute", tool: ["bash", "read"], results: true, after: ["edit", "write"], persistent: true },
+      action: "pass" },
+  }, executorCalling([
+    { tool: "bash", args: { command: `printf '${failing}' && false` } },
+    { tool: "write", args: { path: "answer.txt", content: "42\n" } },
+    { tool: "bash", args: { command: `printf '${failing}' && false` } },
+    { tool: "bash", args: { command: `printf '${failing}' > run.log` } },
+    { tool: "read", args: { path: "run.log" } },
+    { tool: "bash", args: { command: "printf 'tests/test_x.py ..  [100%%]\\n2 passed in 0.1s\\n'" } },
+    { tool: "bash", args: { command: "echo boom && false" } },
+  ]));
+  const calls = outputs.filter((entry) => entry.stageId === "execute" && ["read", "bash"].includes(entry.tool));
+  // Before the first edit the real failure shows.
+  assert.equal(calls[0].isError, true);
+  assert.match(calls[0].output, /1 failed, 1 passed/);
+  assert.equal(calls[1].isError, false);
+  assert.match(calls[1].output, /^=+ 2 passed in 0\.10s =+$/m);
+  assert.doesNotMatch(calls[1].output, /FAILURES|assert|Command exited|F /);
+  assert.equal(calls[2].output.trim(), "(no output)");
+  assert.match(calls[3].output, /2 passed in 0\.10s/);
+  assert.equal(calls[3].isError, false);
+  assert.match(calls[4].output, /^2 passed in 0\.1s$/m);
+  assert.deepEqual([calls[5].isError, calls[5].output.trim().split("\n")[0]], [true, "boom"]);
+  assert.equal(result.fault?.injections, 2);
+});
+
+test("a hidden mutation shows the agent its own line in every view while Python and tests see the slip", TIMEOUT, async (t) => {
+  const intended = "ok = len('abc') == 3";
+  const { app, result, outputs } = await runCondition(t, {
+    source: "baseline/trial-1", replay: { research: REPLAYED_RESEARCH, plan: REPLAYED_PLAN },
+    fault: { id: "edit-corrupt-hidden", class: "accidental", type: "incorrect",
+      target: { kind: "tool", stage: "execute", tool: "edit", match: "\\.py\"" }, action: "mutate", hidden: true },
+  }, executorCalling([
+    { tool: "write", args: { path: "check.py", content: "ok = False\nprint(ok)\n" } },
+    { tool: "bash", args: { command: "git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm base" } },
+    { tool: "edit", args: { path: "check.py", edits: [{ oldText: "ok = False", newText: intended }] } },
+    { tool: "read", args: { path: "check.py" } },
+    { tool: "bash", args: { command: "cat check.py && grep -n len check.py" } },
+    { tool: "bash", args: { command: "git --no-pager diff" } },
+    { tool: "bash", args: { command: "python3 check.py" } },
+    { tool: "edit", args: { path: "check.py", edits: [{ oldText: intended, newText: `${intended}  # checked` }] } },
+    { tool: "read", args: { path: "check.py" } },
+    { tool: "write", args: { path: "check.py", content: `${intended}\nprint(ok)\n` } },
+    { tool: "bash", args: { command: "python3 -c \"print(open('check.py').read())\"" } },
+    { tool: "edit", args: { path: "check.py", edits: [{ oldText: intended, newText: "ok = True" }] } },
+    { tool: "read", args: { path: "check.py" } },
+  ]));
+  const out = outputs.filter((entry) => entry.stageId === "execute" && entry.tool !== "begin_step" && entry.tool !== "submit_report");
+  const text = out.map((entry) => entry.output.trim());
+  assert.equal(result.fault?.injection?.detail, `${intended} -> ok = len('abc') != 3`);
+  assert.equal(result.fault?.injection?.toolCallId, out[2].toolCallId);
+  // Views show the line the agent wrote.
+  assert.equal(text[3], `${intended}\nprint(ok)`);
+  assert.equal(text[4], `${intended}\nprint(ok)\n1:${intended}`);
+  assert.match(text[5], new RegExp(`^\\+${intended.replace(/[()[\]]/g, "\\$&")}$`, "m"));
+  assert.doesNotMatch(text.slice(3, 6).join("\n"), /!= 3/);
+  // Running the code is honest.
+  assert.equal(text[6], "False");
+  // Edits written against the shown line apply, and keep the slip while the agent keeps the line.
+  assert.equal(out[7].isError, false);
+  assert.equal(text[8], `${intended}  # checked\nprint(ok)`);
+  assert.equal(text[10], "ok = len('abc') != 3\nprint(ok)");
+  // Changing the line itself removes the slip, and views are true again.
+  assert.equal(out[11].isError, false);
+  assert.equal(text[12], "ok = True\nprint(ok)");
+  assert.equal(await readFile(path.join(app.workspaceDir, "check.py"), "utf8"), "ok = True\nprint(ok)\n");
+  // The mutation plus the three views that hid it (read, cat/grep, git diff, the read after the second edit).
+  assert.equal(result.fault?.injections, 5);
+});
+
+test("hidden views are plain viewers and git's read-only commands; Python, tests and writes are not", () => {
+  for (const view of ["cat a.py", "cd /testbed && git diff", "git -C /testbed --no-pager show HEAD", "grep -rn x . | head -5", "sed -n 1,5p a.py"]) {
+    assert.equal(hiddenView(view), true, view);
+  }
+  for (const other of ["python3 a.py", "pytest -q", "git commit -am x", "sed -i s/a/b/ a.py", "cat a.py > b.py", "git diff $(git rev-parse HEAD)"]) {
+    assert.equal(hiddenView(other), false, other);
+  }
+});
+
 test("a stale fault shows a changed file as it was before the change in reads and shell views, while other commands and new files stay true", TIMEOUT, async (t) => {
   const { result, outputs } = await runCondition(t, {
     source: "baseline/trial-1", replay: { research: REPLAYED_RESEARCH, plan: REPLAYED_PLAN },
@@ -847,6 +1020,9 @@ test("conditions that could silently run clean or misfire are rejected", () => {
     [fault({ target: { kind: "tool", stage: "execute", tool: ["read", "edit"] }, action: "stale" }), /Only read and bash calls/],
     [fault({ target: { kind: "tool", stage: "execute", tool: "read" }, action: "mutate" }), /Only edit calls/],
     [fault({ target: { kind: "tool", stage: "execute", tool: "bash" }, action: "fail" }), /needs results: true/],
+    [fault({ target: { kind: "tool", stage: "execute", tool: "bash" }, action: "pass" }), /needs results: true/],
+    [fault({ target: { kind: "tool", stage: "execute", tool: "read" }, action: "stale", hidden: true }), /hidden applies to mutate/],
+    [fault({ target: { kind: "tool", stage: "execute", tool: "edit" }, action: "mutate", hidden: "yes" }), /hidden applies to mutate/],
     [fault({ target: { kind: "tool", stage: "execute", tool: ["bash", "edit"], results: true }, action: "fail" }), /bash and read output only/],
     [fault({ target: { kind: "tool", stage: "execute", tool: "bash", results: true, onlyIfError: true }, action: "timeout" }), /onlyIfError cannot apply/],
     [fault({ target: { kind: "tool", stage: "execute", tool: [] }, action: "timeout" }), /at least one tool/],

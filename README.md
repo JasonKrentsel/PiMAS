@@ -3,7 +3,9 @@
 CSE 291A project (Option 5). A fixed pipeline of LLM agents (research → plan → execute, with optional review →
 correct) fixes real bugs from SWE-bench Verified. We inject one controlled fault per run and measure how far it
 spreads, what it costs, and how well full restart and always-verify recover. Phase 1 (the baselines, 399 runs on
-19 tasks) is done; Phase 2 will add dependency-aware recovery and compare it with them.
+19 tasks) is done. Phase 2 added two faults built to get past the agents' own checks (38 runs, done) and is building
+dependency-aware recovery. Its first step, the best case with perfect detection estimated from the saved runs, is
+done; the plan and the decisions still open are in [experiments/phase2/README.md](experiments/phase2/README.md).
 
 The agents are built on Pi Agent (TypeScript), runs go through [Harbor](https://www.tbench.ai/docs), and the model
 is Qwen3.8-27B served by vLLM.
@@ -19,7 +21,7 @@ is Qwen3.8-27B served by vLLM.
 | `pimas_harbor/` | The Harbor agent that runs the pipeline and relays its tool calls into the task container. |
 | `experiments/swe-bench-baseline/` | The clean baseline: task selection, results CSVs, and the scripts every run uses. |
 | `experiments/phase1/` | The fault experiment: condition files, run scripts and `analyze.py`. Its README has the full method. |
-| `experiments/phase2/` | A guide to building recovery on the saved runs, with a starter script (`invalidate.py`). No GPU needed. |
+| `experiments/phase2/` | The two Phase 2 faults' results, the recovery plan and open decisions, and a guide to building recovery on the saved runs: `invalidate.py` (which steps a fault invalidates) and `score.py` (each recovery policy's cost and passes with perfect detection). No GPU needed. |
 | `T4-lite runner/` | Our first attempt, on Terminal-Bench. Kept as a record; its results are not used. |
 
 The rest of `PiMAS/src` is an earlier orchestrator prototype that the pipeline replaced.
@@ -35,18 +37,19 @@ The result tables are in git, so they can be checked without rerunning anything:
 | `experiments/phase1/results/verify-plan.md` | Which conditions got always-verify, and why. |
 | `experiments/phase1/results/failing-tests.md` | Each hidden test a fault broke or left unfixed. |
 | `experiments/phase1/results/memorization-probe.json` | The check that the model cannot write the fixes from memory. |
+| `experiments/phase2/results/` | The same three tables (`summary.md`, `runs.csv`, `failing-tests.md`) for the Phase 2 faults, `tool-false-pass-all` and `edit-corrupt-hidden`, beside the Phase 1 controls they are paired with; and `recovery-bounds.md` and `recovery-runs.csv`, the recovery policies scored on every fault (step 1 of the plan). |
 | `experiments/swe-bench-baseline/results/` | The clean baseline and pilot, one row per run. |
 
-**The saved runs** are in `data/`: `phase1-runs.tar.xz` (all 399 Phase 1 runs) and `swe-baseline-runs.tar.xz` (the
-60 clean baseline runs). Each run has its grade, every conversation, tool call and stage diff, and the provenance
+**The saved runs** are in `data/`: `phase1-runs.tar.xz` (all 399 Phase 1 runs), `phase2-runs.tar.xz` (the 38
+Phase 2 fault runs, plus the superseded runs and the code they ran with; see `jobs/phase2/CODE.md`) and `swe-baseline-runs.tar.xz` (the 60 clean baseline runs). Each run has its grade, every conversation, tool call and stage diff, and the provenance
 graph. Only the whole-filesystem manifests are left out, to keep them small. No GPU is needed to use them:
 
 ```bash
-mkdir -p jobs && tar -C jobs -xJf data/phase1-runs.tar.xz && tar -C jobs -xJf data/swe-baseline-runs.tar.xz
+mkdir -p jobs && for f in phase1-runs phase2-runs swe-baseline-runs; do tar -C jobs -xJf data/$f.tar.xz; done
 cd experiments/phase1 && python3 -I analyze.py /tmp/check ../../jobs/phase1/*   # rebuilds results/ exactly
 ```
 
-Each run is a folder `jobs/phase1/<condition>/<task>__<id>/`; `agent/pimas/` holds `summary.json`,
+Each run is a folder `jobs/phase1/<condition>/<task>__<id>/` (`jobs/phase2/...` for Phase 2); `agent/pimas/` holds `summary.json`,
 `provenance.jsonl`, `tool-calls.jsonl`, `sessions/` and `patches/`. `pimas_harbor/README.md` describes each file.
 
 ## Reproducing

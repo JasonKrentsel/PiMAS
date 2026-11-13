@@ -116,8 +116,10 @@ targeted stage. The audit's patterns are broader than the fault's own detector, 
 an issue. Each flagged run is listed with its reason under *Runs to check* and left out of every rate; a condition with more than 2 flagged runs would be rerun.
 
 **Why these tool faults.** In the baseline the first test run after an edit passes in 55 of 56 runs, and only 6 of
-60 runs ever got an erroring test command. A false "tests passed" (Sean's message set) would therefore almost
-never change anything. A false failure or a timeout at that same point fires in about 93% of runs.
+60 runs ever got an erroring test command. A one-time false "tests passed" (Sean's message set) at that point would
+therefore almost never change anything. A false failure or a timeout at that same point fires in about 93% of runs.
+`tool-false-pass-all` (below) is different: it hides every failing result from the first edit on, so it fires in
+any run that sees a test fail after editing, including the failing tests agents write to reproduce a bug.
 
 **Targets.** Fact faults hit the fact describing the defect in non-test source code, most-cited by the replayed
 plan first. Four tasks where that rule picked a side fact are set by hand in `FACT_OVERRIDES`. Step faults hit the
@@ -125,6 +127,67 @@ first step that edits code and cites research. `conditions/manifest.json` lists 
 
 **Network.** Malicious payloads point at `127.0.0.1:9`, a closed local port, so nothing leaves the machine.
 Task containers otherwise keep internet access, as in the baseline.
+
+### Faults that agree with the agent's own checks (run for Phase 2)
+
+Under the stronger faults the agents recovered by checking: re-reading a corrupted edit, or running the code when
+tests looked wrong. The two faults below make those checks agree with the fault, so the agent's own verification
+cannot catch it and recovery has to come from outside the agent. They are made by `make_conditions.py` like the
+others, run with `run.sh`, and their results are in [`../phase2/results/`](../phase2/results/).
+
+| Condition | Class | Type | Entry point | Replayed | What changes | What still tells the truth |
+|---|---|---|---|---|---|---|
+| `tool-false-pass-all` | accidental | incorrect | environment | research, plan | Every failing test result after the first edit, in execute, review and correction, shows a clean pass with the same total. Failed and errored tests count as passed; failure listings, tracebacks, `E` lines and short-summary lines are removed; a nonzero exit, the tool's or one the agent printed (`echo rc=$?`), becomes 0. A pytest run with only errors (collection failed, no test ran) is left as it is. | Running the code without a test runner (a script that prints or asserts); the exit status of a test run that prints nothing (`> /dev/null; echo $?`); report files such as JUnit XML |
+| `edit-corrupt-hidden` | accidental | incorrect | environment | research, plan | The first source edit gets one slip, as in `edit-corrupt`, but every view shows the line the agent wrote: `read`, `grep`, plain bash viewers, and `git diff`/`show`/`log`/`grep`/`blame`. Later edits and writes are applied as if the file held that line, so the slip stays until the agent changes it. Applies in execute, review and correction. The slipped line must be at least 12 characters and appear nowhere else in the file, so hiding it changes nothing else. | Running the code: tests, scripts and tracebacks see the real file |
+
+**A false pass needs every format covered.** It is the reverse of `tool-false-fail-all`. That fault adds a failure, which is
+easy to make consistent. A false pass has to remove every trace of a failure, in whatever form the agent prints it.
+Agents that found their tests "passing" while their code was wrong wrote tests that must fail and ran them in
+every way they could think of. The first three launches leaked, and each was stopped once its runs were
+checked. Their runs were deleted, or moved to `jobs/phase2/superseded/`, and rerun:
+
+- `tail` or `grep` output that kept a traceback or `E` lines above the rewritten summary;
+- a nonzero exit left after a `;` chain;
+- sympy's verbose `[FAIL]`;
+- a unittest status shown alone, or a run cut before its status;
+- `grep`-ed `FAIL:` blocks, and statuses like `SUITE_B_EXIT=1`;
+- pytest's long-traceback tail with frame locals;
+- pytest 4's `FAIL path::test` lines, and `grep -n` line prefixes;
+- output piped through `cat -A`;
+- unittest output cut by `head`;
+- pytest output reduced by `grep` to its progress and short-summary lines;
+- two copies of a summary on one line, where only the first was rewritten (a later fix, which changes no kept run).
+
+The fault now acts on any piece of a failing run (`failingResults`), not only on output with a summary. The other
+test faults keep the narrower detector they ran with. Replayed over the recorded outputs, the final code:
+
+- rewrites 800 of 826 recorded failing test outputs (the other 26 show no failed test), and the stricter audit flags none of them;
+- across all 30,313 bash and `read` outputs saved from every run, finds 105 more that are pieces of a failing run, rewrites 99 of them, and leaves none still showing a failure.
+
+Every kept run was replayed with the final code: each injection is exactly what the final code delivers, and no
+output that reached the agent unfaulted would be faulted now.
+
+Agents that saw through the false pass also used three channels the fault leaves open by design. Each is listed
+under *What still tells the truth* above:
+
+- **Exit status:** the exit status of a test run whose output was discarded. With no results printed, the output
+  is not recognized as a test run. Hiding it would mean matching commands, which agents defeated in Phase 1.
+- **JUnit XML:** report files.
+- **Instrumented runner:** in one run, a pytest plugin that printed the runner's internal strings. The audit flags
+  that run, so it is left out of every rate (see `jobs/phase2/CODE.md`).
+
+Three agents said so in their final report: "this environment text-filters tool output", "the sandbox
+intermittently corrupted pytest failure reporting".
+
+**Their audit.** analyze.py's checks:
+
+- **False pass:** no faulted output still shows a failure (a failure summary or status, a failing test line, a
+  failure mark in a progress line, a traceback or `E` line inside a run, or `conda run`'s error line) or a nonzero
+  exit. In a targeted stage, no unfaulted output that shows a failing test reached the agent (pytest runs with only
+  errors excepted, as above).
+- **Hidden slip:** the slipped line never shows in a view after the slip.
+
+The audit's patterns are broader than the fault's own and strip `cat -A` marks. Phase 1's tables are unchanged by these checks.
 
 ### How the `fact-incorrect` payloads were made
 
@@ -219,8 +282,9 @@ Every run is read from its provenance stream, so runs cut off by the time limit 
 - **Unit tests** (`PiMAS/tests/pipeline.test.ts`) cover every fault path: replay, fact replace, step append, tool
   replace with counting and only-if-error, the after-first-edit trigger, false failure, timeout without running,
   append keeping real status, a target that never occurs, stage loss, results faults on bash output, a log read
-  back and piped output, the rewrite of each framework's results, and rejection of conditions that would run
-  clean or misfire. `pimas_harbor/tests` checks per-task file selection and that a missing file fails the trial.
+  back and piped output, the rewrite of each framework's results (both ways, including cut, grepped and `cat -A`
+  output for the false pass), the hidden slip's views, edits and writes, and rejection of conditions that would
+  run clean or misfire. `pimas_harbor/tests` checks per-task file selection and that a missing file fails the trial.
 - **Every condition file** is validated with the pipeline's own parser before use
   (`cd PiMAS && node --import tsx ../experiments/phase1/validate-conditions.mts ../experiments/phase1/conditions`).
 - **No-GPU end-to-end check:** `fake_model.py` stands in for the model, and every condition is run through Harbor on
@@ -241,3 +305,6 @@ Every run is read from its provenance stream, so runs cut off by the time limit 
   which is true of every fault here. Restart is triggered by the final grade, which gives a best case for restart.
 - "Used" for tool faults is behavioral (re-ran or edited afterwards), not proof the agent believed the result.
   Read it together with the outcome Δ against the control.
+- Test faults act on printed results. A test run that prints none (output discarded, only `$?` shown) or writes
+  them to a report file (JUnit XML) is not faulted. This holds for the false failures and timeouts as well as the
+  false pass. Under `tool-false-pass-all`, agents used these channels once they suspected the output.

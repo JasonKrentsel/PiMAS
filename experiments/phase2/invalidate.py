@@ -9,6 +9,7 @@ dependencies, so shared files stand in for them. Step minutes come from each ste
 """
 import json
 import pathlib
+import re
 import sys
 from datetime import datetime
 
@@ -21,21 +22,35 @@ def load(trial: pathlib.Path) -> dict:
             "injections": [e["injection"] for e in events if e["type"] == "fault"]}
 
 
+WORKSPACE = "/testbed/"
+
+
+# Files every test run or commit rewrites: git's index and objects, bytecode, pytest's cache (also as v/cache/ when
+# pytest picks an odd root) and other tool caches.
+NOT_WORK = re.compile(r"/(\.git|__pycache__|\.pytest_cache|\.mypy_cache|\.hypothesis|\.tox|\.eggs)/|/v/cache/|\.pyc$")
+
+
+def is_work(path: str) -> bool:
+    """A file in the task's code. Caches and scratch files outside the workspace (/tmp logs) would link steps
+    that share nothing but running the tests."""
+    return path.startswith(WORKSPACE) and not NOT_WORK.search(path)
+
+
 def step_files(execute: dict) -> dict:
-    """Files each executor step created or modified, without Python's bytecode caches."""
+    """Files in the task's code that each executor step created or modified."""
     files = {}
     for seg in execute.get("stepFileChanges") or []:
         if seg["stepId"]:
-            changes = seg["fileChanges"]
+            changes = seg["fileChanges"] or {}  # null for a step cut off by the time limit
             files.setdefault(seg["stepId"], set()).update(
-                f for f in changes["created"] + changes["modified"] if "__pycache__" not in f)
+                f for f in changes.get("created", []) + changes.get("modified", []) if is_work(f))
     return files
 
 
 def step_minutes(execute: dict) -> dict:
     minutes = {}
     for seg in execute.get("stepFileChanges") or []:
-        if seg["stepId"]:
+        if seg["stepId"] and seg.get("endedAt"):
             span = (iso(seg["endedAt"]) - iso(seg["startedAt"])) / 60
             minutes[seg["stepId"]] = minutes.get(seg["stepId"], 0) + span
     return minutes
@@ -59,8 +74,10 @@ def invalidate(run: dict) -> tuple[set, list]:
     else:                                               # a tool result: the steps it was delivered in
         bad = {i["stepId"] for i in run["injections"] if i.get("stepId")}
     files = step_files(run["artifacts"].get("execute", {}))
+    # Work outside the plan ("unplanned") has no place in the step order, so it counts as before every step.
+    position = lambda sid: order.index(sid) if sid in order else -1
     for sid in order:                                   # later steps that touched a bad step's files
-        if sid not in bad and any(order.index(b) < order.index(sid) and files.get(b, set()) & files.get(sid, set())
+        if sid not in bad and any(position(b) < position(sid) and files.get(b, set()) & files.get(sid, set())
                                   for b in bad):
             bad.add(sid)
     return bad, []
