@@ -5,6 +5,7 @@ import type { Usage } from "@earendil-works/pi-ai";
 import type { AgentRole } from "./agent-config.js";
 import type { FaultInjection } from "./faults.js";
 import type { FileChanges } from "./filesystem.js";
+import type { EarlyTimeoutAlert, IncompleteTestLogAlert } from "./timeout-watchdog.js";
 
 export type StageName = "research" | "plan" | "execute" | "review" | "correct" | "solve";
 
@@ -92,6 +93,8 @@ export type ProvenanceEvent =
   | { type: "tool_call"; stageId: string; call: ToolCallRecord }
   | { type: "step_files"; stageId: string; segment: StepFileChanges }
   | { type: "fault"; injection: FaultInjection }
+  | { type: "watchdog_early_timeout"; alert: EarlyTimeoutAlert }
+  | { type: "watchdog_incomplete_test_log"; alert: IncompleteTestLogAlert }
   | { type: "stage_end"; artifact: StageArtifact }
   | { type: "run_end"; status: string; durationMs: number };
 

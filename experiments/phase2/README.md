@@ -312,3 +312,13 @@ per failed run (`../phase1/results/summary.md`). Then score the invalidation its
   the first edit have no events: the fault had nothing to hide.
 - A step cut off by the time limit has `fileChanges: null` and no `endedAt` (`invalidate.py` handles both), and
   tool calls the executor tagged `unplanned` belong to no plan step (`invalidate.py` places them before every step).
+
+
+
+## Fault Recovery Method: Watchdog - Sean
+Implemented a watch dog that looks out for timeout messages 
+- It watches tool calls for suspiciously early timeout messages. The starting threshold is 50% of the tool’s timeout limit.
+- It also flags some incomplete test logs, because the timeout fault can affect results read from files.
+- It records alerts but does not stop the agent or verify the code.
+- On saved runs, it flagged 326 of 342 faulted results; it raised no alerts in 19 clean runs.
+The next step is to decide what happens after an alert—such as using an independent verifier to check the result and help the executor avoid repeating the loop.

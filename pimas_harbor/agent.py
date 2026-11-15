@@ -20,6 +20,7 @@ environment:
     PIMAS_RUN_SNAPSHOT     0 skips the whole-container manifests before and after the run (default: 1)
     PIMAS_CONDITIONS       directory of per-task condition files, <task>.json, giving replayed stage
                            outputs and at most one fault (default: none). A task without a file fails.
+    PIMAS_WATCHDOG_TIMEOUT_RATIO  enable early-timeout alerts with a fraction in (0, 1] (e.g. 0.5).
     PIMAS_OFFLINE          1 disconnects the task container from its networks while the agent works, so
                            it cannot fetch the upstream fix; they are reconnected for grading. Docker
                            environments only; a container that still reaches the internet fails the trial.
@@ -78,6 +79,7 @@ class PimasAgent(BaseAgent):
             "snapshot_root": self._setting("PIMAS_SNAPSHOT_ROOT", "/"),
             "run_snapshot": self._setting("PIMAS_RUN_SNAPSHOT", "1"),
             "conditions": self._setting("PIMAS_CONDITIONS", ""),
+            "watchdog_timeout_ratio": self._setting("PIMAS_WATCHDOG_TIMEOUT_RATIO", ""),
             "offline": self._setting("PIMAS_OFFLINE", "0"),
         }
 
@@ -115,6 +117,8 @@ class PimasAgent(BaseAgent):
         ]
         if settings["review"] not in ("0", "false", "False"):
             command.append("--review")
+        if settings["watchdog_timeout_ratio"]:
+            command += ["--watchdog-timeout-ratio", settings["watchdog_timeout_ratio"]]
         condition = self._condition_file()
         if condition:
             command += ["--condition", str(condition)]

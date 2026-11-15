@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Type, type Usage } from "@earendil-works/pi-ai";
@@ -19,6 +20,7 @@ import {
 } from "./provenance.js";
 import { collectUsage } from "./runtime.js";
 import { shellQuote, type Workspace } from "./workspace.js";
+import { DEFAULT_EARLY_TIMEOUT_RATIO, earlyTimeoutAlert, incompleteTestLogAlert, reportsBashTimeout, validateEarlyTimeoutRatio, type EarlyTimeoutAlert, type IncompleteTestLogAlert } from "./timeout-watchdog.js";
 
 /**
  * Fixed-topology alternative to TaskRun: host code, not an orchestrator model, decides
@@ -44,6 +46,8 @@ export interface PipelineOptions {
   snapshotRoot?: string | null;
   /** Replayed clean outputs and at most one controlled fault (pipeline mode only). */
   condition?: Condition;
+  /** Opt in to the observation-only timeout watchdog. */
+  watchdog?: { earlyTimeoutRatio?: number };
   signal?: AbortSignal;
 }
 
@@ -64,6 +68,7 @@ export interface PipelineResult {
   provenanceFile: string;
   /** The run's fault, where it first fired, and how often; null injection means its target never occurred. */
   fault: { spec: FaultSpec; injection: FaultInjection | null; injections: number } | null;
+  watchdog?: { earlyTimeoutRatio: number; alerts: EarlyTimeoutAlert[]; logAlerts: IncompleteTestLogAlert[] };
 }
 
 export const PIPELINE_COMMAND_LIMITS: CommandLimits = { defaultSeconds: 600, maxSeconds: 3600 };
@@ -78,6 +83,12 @@ const SUBMIT_ALLOWANCE = 10;
 
 export async function runPipeline(options: PipelineOptions): Promise<PipelineResult> {
   const mode = options.mode ?? "pipeline";
+  const watchdog = options.watchdog === undefined ? undefined : {
+    earlyTimeoutRatio: options.watchdog.earlyTimeoutRatio ?? DEFAULT_EARLY_TIMEOUT_RATIO,
+    alerts: [] as EarlyTimeoutAlert[],
+    logAlerts: [] as IncompleteTestLogAlert[],
+  };
+  if (watchdog) validateEarlyTimeoutRatio(watchdog.earlyTimeoutRatio);
   const review = options.review ?? false;
   if (mode === "pipeline" && !options.roles.researcher) {
     throw new Error("The pipeline needs a researcher profile in the agents configuration");
@@ -98,7 +109,8 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     void log.record({ type: "fault", injection: record });
   };
   const toolFaults = faultTools(fault, injected, (options.commandLimits ?? PIPELINE_COMMAND_LIMITS).defaultSeconds, options.workspace);
-  const context: StageContext = { options, log, artifacts, tracker, fault, injected, toolFaults };
+  const watchdogState = watchdog ? { result: watchdog, sawTimeout: false } : undefined;
+  const context: StageContext = { options, log, artifacts, tracker, fault, injected, toolFaults, watchdogState };
   // Everything that shapes agent behavior, so a later reader can tell runs apart.
   const settings = {
     workspaceCwd: options.workspace.cwd,
@@ -107,6 +119,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     toolCallBudgets: { ...DEFAULT_BUDGETS, ...options.toolCallBudgets },
     submitAllowance: SUBMIT_ALLOWANCE,
     snapshotRoot,
+    ...(watchdog ? { watchdog: { earlyTimeoutRatio: watchdog.earlyTimeoutRatio } } : {}),
     roles: options.roles,
     condition: condition
       ? { source: condition.source, replayed: Object.keys(condition.replay), fault, sha256: contentDigest(condition) }
@@ -193,6 +206,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     status, approved, artifacts, durationMs, provenanceFile: log.file,
     usage: sumUsage(artifacts.map((artifact) => artifact.usage)),
     fault: fault ? { spec: fault, injection: injections[0] ?? null, injections: injections.length } : null,
+    ...(watchdog ? { watchdog } : {}),
   };
 }
 
@@ -204,6 +218,7 @@ interface StageContext {
   fault: FaultSpec | null;
   injected: (record: FaultInjection) => void;
   toolFaults: ToolFaults;
+  watchdogState?: { result: { earlyTimeoutRatio: number; alerts: EarlyTimeoutAlert[]; logAlerts: IncompleteTestLogAlert[] }; sawTimeout: boolean };
 }
 
 interface StageSpec<T> {
@@ -292,10 +307,10 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
     let spent = 0;
     let total = 0;
     let overBudget = false;
-    const starts = new Map<string, { args: unknown; stepId: string | null; startedAt: string }>();
+    const starts = new Map<string, { args: unknown; stepId: string | null; startedAt: string; monotonicStart: number }>();
     const unsubscribe = active.subscribe((event) => {
       if (event.type === "tool_execution_start") {
-        starts.set(event.toolCallId, { args: event.args, stepId: currentStep, startedAt: new Date().toISOString() });
+        starts.set(event.toolCallId, { args: event.args, stepId: currentStep, startedAt: new Date().toISOString(), monotonicStart: performance.now() });
       } else if (event.type === "tool_execution_end") {
         const start = starts.get(event.toolCallId);
         starts.delete(event.toolCallId);
@@ -309,6 +324,30 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
         };
         toolCalls.push(call);
         void log.record({ type: "tool_call", stageId: spec.id, call });
+        if (context.watchdogState && start) {
+          const state = context.watchdogState;
+          const output = resultText(event.result);
+          if (reportsBashTimeout(call.tool, call.isError, output)) state.sawTimeout = true;
+          const alert = earlyTimeoutAlert({
+            stageId: spec.id, stepId: call.stepId, toolCallId: call.toolCallId, tool: call.tool,
+            args: start.args, isError: call.isError, output,
+            elapsedMs: performance.now() - start.monotonicStart,
+            limits: options.commandLimits ?? PIPELINE_COMMAND_LIMITS,
+            thresholdRatio: state.result.earlyTimeoutRatio,
+          });
+          if (alert) {
+            state.result.alerts.push(alert);
+            void log.record({ type: "watchdog_early_timeout", alert });
+          }
+          const logAlert = incompleteTestLogAlert({
+            stageId: spec.id, stepId: call.stepId, toolCallId: call.toolCallId,
+            tool: call.tool, args: start.args, isError: call.isError, output, sawTimeout: state.sawTimeout,
+          });
+          if (logAlert) {
+            state.result.logAlerts.push(logAlert);
+            void log.record({ type: "watchdog_incomplete_test_log", alert: logAlert });
+          }
+        }
         void log.recordToolOutput({
           stageId: spec.id, toolCallId: call.toolCallId, tool: call.tool, stepId: call.stepId,
           args: start?.args ?? null, output: resultText(event.result), isError: call.isError,

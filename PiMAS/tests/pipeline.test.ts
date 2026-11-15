@@ -404,7 +404,7 @@ test("the bridge relays every workspace command and writes a summary", TIMEOUT, 
   const child = spawn(process.execPath, [
     "--import", pathToFileURL(path.resolve("node_modules/tsx/dist/loader.mjs")).href, path.resolve("src/pipeline-bridge.ts"),
     "--models", app.modelsFile, "--agents", app.agentsFile, "--state", app.state, "--mode", "single",
-    "--snapshot-root", app.workspaceDir,
+    "--snapshot-root", app.workspaceDir, "--watchdog-timeout-ratio", "0.8",
   ], { cwd: app.root, stdio: ["pipe", "pipe", "pipe"] });
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr += String(chunk); });
@@ -434,6 +434,7 @@ test("the bridge relays every workspace command and writes a summary", TIMEOUT, 
   assert.ok(relayed.some((command) => command.includes("echo 42 > answer.txt")));
   const summary = JSON.parse(await readFile(path.join(app.state, "summary.json"), "utf8"));
   assert.deepEqual(summary.artifacts.map((artifact: { id: string }) => artifact.id), ["solve"]);
+  assert.deepEqual(summary.watchdog, { earlyTimeoutRatio: 0.8, alerts: [], logAlerts: [] });
 });
 
 test("file tracking reports created, modified, and deleted files and ignores its own manifests", TIMEOUT, async (t) => {
@@ -588,6 +589,53 @@ test("a timeout fault reports a timeout without running the command", TIMEOUT, a
   assert.match(bash[1].output, /Command timed out after 600 seconds[\s\S]*code 124/);
   await assert.rejects(readFile(path.join(app.workspaceDir, "ran.txt")));
   assert.equal(result.fault?.injection?.original, "(not run)");
+  assert.equal(result.watchdog, undefined);
+});
+
+test("watchdog records early injected timeouts but not a real command timeout", TIMEOUT, async (t) => {
+  const calls = [
+    { tool: "write", args: { path: "answer.txt", content: "42\n" } },
+    { tool: "bash", args: { command: "sleep 2", timeout: 0.2 } },
+    { tool: "bash", args: { command: "printf '1 passed in 0.01s\\n'", timeout: 10 } },
+    { tool: "bash", args: { command: "printf '1 passed in 0.01s\\n'", timeout: 20 } },
+    { tool: "bash", args: { command: "printf '=== test session starts ===\\n1 passed in 0.01s\\n' > result.log" } },
+    { tool: "read", args: { path: "result.log" } },
+    { tool: "bash", args: { command: "printf '1 passed in 0.01s\\n' > empty.log" } },
+    { tool: "read", args: { path: "empty.log" } },
+  ];
+  const app = await fixture(t, (stage, turn, request) => stage === "review"
+    ? ([
+      { tool: "bash", args: { command: "printf '1 passed in 0.01s\\n'", timeout: 10 } },
+      { tool: "read", args: { path: "result.log" } },
+      { tool: "submit_review", args: { approved: true, reason: "ok", problems: [] } },
+    ] as Reply[])[turn] ?? { text: "done" }
+    : executorCalling(calls)(stage, turn, request));
+  const result = await runPipeline({
+    directory: app.state, workspace: localWorkspace(app.workspaceDir), modelsFile: app.modelsFile,
+    roles: app.roles, snapshotRoot: app.workspaceDir, request: REQUEST,
+    watchdog: {}, review: true,
+    condition: parseCondition({
+      source: "baseline/trial-1", replay: { research: REPLAYED_RESEARCH, plan: REPLAYED_PLAN },
+      fault: { id: "tool-timeout-all", class: "accidental", type: "timeout",
+        target: { kind: "tool", stage: ["execute", "review", "correct"], tool: ["bash", "read"], results: true, after: ["write"], persistent: true },
+        action: "timeout" },
+    }),
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(result.watchdog?.earlyTimeoutRatio, 0.5);
+  assert.equal(result.fault?.injections, 6);
+  assert.deepEqual(result.watchdog?.alerts.map((a) => [a.stageId, a.stepId, a.timeoutSeconds]),
+    [["execute", "S1", 10], ["execute", "S1", 20], ["review", null, 10]]);
+  assert.deepEqual(result.watchdog?.logAlerts.map((a) => [a.stageId, a.reason]), [
+    ["execute", "test_started_without_results"], ["execute", "empty_log_after_timeout"], ["review", "test_started_without_results"],
+  ]);
+  const events = (await readFile(result.provenanceFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  const alerts = events.filter((event) => event.type === "watchdog_early_timeout").map((event) => event.alert);
+  assert.deepEqual(alerts, result.watchdog?.alerts);
+  const readAlerts = events.filter((event) => event.type === "watchdog_incomplete_test_log").map((event) => event.alert);
+  assert.deepEqual(readAlerts, result.watchdog?.logAlerts);
+  const injectionIds = events.filter((event) => event.type === "fault").map((event) => event.injection.toolCallId);
+  assert.deepEqual([...alerts, ...readAlerts].map((a) => a.toolCallId).sort(), injectionIds.sort());
 });
 
 test("an appended tool fault keeps the real output and status", TIMEOUT, async (t) => {
