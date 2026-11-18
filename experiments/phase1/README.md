@@ -9,6 +9,9 @@ The result tables are in `results/`: `summary.md` (every condition), `runs.csv` 
 
 ## How a run is controlled
 
+Enable the optional watchdog for a condition with `K=1 ./run.sh tool-timeout-all --watchdog true`.
+The watchdog is off by default; its timeout threshold is set in `PiMAS/src/timeout-watchdog.ts`.
+
 Each condition is a folder of per-task files, `conditions/<condition>/<task>.json`, made by `make_conditions.py`
 from the baseline. Harbor's agent picks the file for its task through `PIMAS_CONDITIONS`. A task without a file
 fails the trial rather than running clean.

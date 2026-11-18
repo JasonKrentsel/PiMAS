@@ -45,16 +45,22 @@ class LocalEnvironment:
 
 @unittest.skipIf(PimasAgent is None, "Harbor is not installed")
 class AgentRelayTest(unittest.TestCase):
-    def test_watchdog_ratio_is_opt_in_and_passed_to_the_bridge(self):
+    def test_watchdog_is_opt_in_and_passed_to_the_bridge(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plain = PimasAgent(logs_dir=root / "plain", model_name="m", extra_env={"PIMAS_ROOT": tmp})
-            self.assertNotIn("--watchdog-timeout-ratio", plain._bridge_command(root / "state")[0])
+            command, _ = plain._bridge_command(root / "state")
+            self.assertEqual(command[command.index("--watchdog") + 1], "false")
             enabled = PimasAgent(logs_dir=root / "enabled", model_name="m", extra_env={
-                "PIMAS_ROOT": tmp, "PIMAS_WATCHDOG_TIMEOUT_RATIO": "0.8",
+                "PIMAS_ROOT": tmp, "PIMAS_WATCHDOG": "true",
             })
             command, _ = enabled._bridge_command(root / "state")
-            self.assertEqual(command[command.index("--watchdog-timeout-ratio") + 1], "0.8")
+            self.assertEqual(command[command.index("--watchdog") + 1], "true")
+            invalid = PimasAgent(logs_dir=root / "invalid", model_name="m", extra_env={
+                "PIMAS_ROOT": tmp, "PIMAS_WATCHDOG": "yes",
+            })
+            with self.assertRaisesRegex(ValueError, "PIMAS_WATCHDOG must be true or false"):
+                invalid._bridge_command(root / "state")
 
     def test_relays_commands_honours_timeouts_and_cancellation_and_fills_context(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -315,10 +315,15 @@ per failed run (`../phase1/results/summary.md`). Then score the invalidation its
 
 
 
-## Fault Recovery Method: Watchdog - Sean
+## Fault Recovery Method: Watchdog - Sean PiMAS/src/timeout-watchdog.ts
 Implemented a watch dog that looks out for timeout messages 
 - It watches tool calls for suspiciously early timeout messages. The starting threshold is 50% of the tool’s timeout limit.
 - It also flags some incomplete test logs, because the timeout fault can affect results read from files.
 - It records alerts but does not stop the agent or verify the code.
 - On saved runs, it flagged 326 of 342 faulted results; it raised no alerts in 19 clean runs.
 The next step is to decide what happens after an alert—such as using an independent verifier to check the result and help the executor avoid repeating the loop.
+
+Next set up having an executor fork or find a separate and secure workspace to run independent test. Aka we know there is a fault, 
+we need a way to find the truth now. 
+
+A similar idea will be used for the other faults but just doing one fault at at time

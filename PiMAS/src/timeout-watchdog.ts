@@ -1,5 +1,6 @@
 import type { CommandLimits } from "./execution-tools.js";
-import { testResults } from "./faults.js";
+import { testResults } from "./test-results.js";
+import type { WatchdogDetector, WatchdogEvent } from "./watchdog-types.js";
 
 /** A timing mismatch is a suspicion, not proof that the timeout is false. */
 export interface EarlyTimeoutAlert {
@@ -20,7 +21,8 @@ export interface IncompleteTestLogAlert {
   reason: "test_started_without_results" | "empty_log_after_timeout";
 }
 
-export const DEFAULT_EARLY_TIMEOUT_RATIO = 0.5;
+/** Adjust this threshold here; the watchdog's on/off switch enables all detectors. */
+export const DEFAULT_EARLY_TIMEOUT_RATIO = 0.5; //if time out result came back x of actual timeout time
 
 export function reportsBashTimeout(tool: string, isError: boolean, output: string): boolean {
   return tool === "bash" && isError && /(?:^|\n)Command timed out after \d+(?:\.\d+)? seconds\b/.test(output);
@@ -73,5 +75,40 @@ export function earlyTimeoutAlert(input: {
   return {
     stageId: input.stageId, stepId: input.stepId, toolCallId: input.toolCallId,
     elapsedMs: input.elapsedMs, timeoutSeconds, thresholdRatio: input.thresholdRatio,
+  };
+}
+
+export interface TimeoutDetectorResult {
+  earlyTimeoutRatio: number;
+  alerts: EarlyTimeoutAlert[];
+  logAlerts: IncompleteTestLogAlert[];
+}
+
+/** Keep timeout-specific state and alerts together, with a fresh instance for each run. */
+export function createTimeoutDetector(options: { earlyTimeoutRatio?: number } = {}): WatchdogDetector & { result: TimeoutDetectorResult } {
+  const result: TimeoutDetectorResult = {
+    earlyTimeoutRatio: options.earlyTimeoutRatio ?? DEFAULT_EARLY_TIMEOUT_RATIO,
+    alerts: [],
+    logAlerts: [],
+  };
+  validateEarlyTimeoutRatio(result.earlyTimeoutRatio);
+  let sawTimeout = false;
+  return {
+    result,
+    observe(input) {
+      if (reportsBashTimeout(input.tool, input.isError, input.output)) sawTimeout = true;
+      const events: WatchdogEvent[] = [];
+      const alert = earlyTimeoutAlert({ ...input, thresholdRatio: result.earlyTimeoutRatio });
+      if (alert) {
+        result.alerts.push(alert);
+        events.push({ type: "watchdog_early_timeout", alert });
+      }
+      const logAlert = incompleteTestLogAlert({ ...input, sawTimeout });
+      if (logAlert) {
+        result.logAlerts.push(logAlert);
+        events.push({ type: "watchdog_incomplete_test_log", alert: logAlert });
+      }
+      return events;
+    },
   };
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { earlyTimeoutAlert, incompleteTestLogAlert, validateEarlyTimeoutRatio } from "../src/timeout-watchdog.js";
+import { createTimeoutDetector, earlyTimeoutAlert, incompleteTestLogAlert, validateEarlyTimeoutRatio } from "../src/timeout-watchdog.js";
 
 const base = {
   stageId: "execute", stepId: "S1", toolCallId: "call-1", tool: "bash",
@@ -40,4 +40,16 @@ test("flags incomplete test logs without pretending that reading them timed out"
   assert.equal(incompleteTestLogAlert({ ...read, args: { path: "/tmp/source.py" } }), null);
   assert.equal(incompleteTestLogAlert({ ...read, sawTimeout: false, output: "=== test session starts ===\ncollected 2 items\n" })?.reason, "test_started_without_results");
   assert.equal(incompleteTestLogAlert({ ...read, output: "=== test session starts ===\n2 passed in 0.1s\n" }), null);
+});
+
+test("timeout detectors keep state and alerts separate between runs", () => {
+  const first = createTimeoutDetector();
+  const second = createTimeoutDetector();
+  assert.deepEqual(first.observe(base).map((event) => event.type), ["watchdog_early_timeout"]);
+  const read = { ...base, tool: "read", args: { path: "/tmp/tests.log" }, isError: false, output: "" };
+  assert.deepEqual(first.observe(read).map((event) => event.type), ["watchdog_incomplete_test_log"]);
+  assert.deepEqual(second.observe(read), []);
+  assert.equal(first.result.alerts.length, 1);
+  assert.equal(first.result.logAlerts.length, 1);
+  assert.deepEqual(second.result, { earlyTimeoutRatio: 0.5, alerts: [], logAlerts: [] });
 });

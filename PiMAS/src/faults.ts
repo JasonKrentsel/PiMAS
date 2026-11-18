@@ -3,6 +3,8 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Fact, Findings, Plan, PlanStep } from "./pipeline.js";
 import type { StageName } from "./provenance.js";
 import { shellQuote, type Workspace } from "./workspace.js";
+import { ANSI, UNITTEST_RAN, UNITTEST_INLINE, PYTEST_SUMMARY, TEST_PASSED, TEST_FAILED, SYMPY_SUMMARY, testResults } from "./test-results.js";
+export { testResults } from "./test-results.js";
 
 /**
  * One controlled fault per run, for the failure-propagation study. A condition file gives the
@@ -405,17 +407,6 @@ export function faultTools(
 
 // --- Test-run results, for faults that fire on what a test run printed rather than how it was started. ---
 
-const UNITTEST_RAN = /^Ran (\d+) tests? in [\d.]+s$/m;
-// "Ran N tests in Xs" and its OK on one line, as an agent's own echo or `tr` can print them.
-const UNITTEST_INLINE = /\bRan \d+ tests? in [\d.]+s\b.*?\bOK\b(?: \(([^)\n]*)\))?/;
-// Summaries are found anywhere in a line: agents often print them after their own text ("run 1: 10 passed in 0.04s").
-const PYTEST_SUMMARY = /^(.*?)\b((?:\d+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed|warnings?|warns?|rerun)(?:, )?)+) in [\d.]+ ?s(?:econds)?\b.*$/m;
-/** Per-test lines, which tell the truth even when the summary was cut off (e.g. `| head`). */
-const TEST_PASSED = /^(?:\S+::\S+ PASSED\b|.* \.\.\. ok$)/m;
-const TEST_FAILED = /^(?:\S+::\S+ (?:FAILED|ERROR)\b|.* \.\.\. (?:FAIL|ERROR)$)/m;
-// pytest colours its output; results are found and rewritten in the plain text.
-const ANSI = /\x1b\[[0-9;]*m/g;
-const SYMPY_SUMMARY = /^(.*?)tests finished: (\d+) passed(.*?)( ?=*)$/m;
 // A summary line as the runner prints it, not quoted inside the agent's own text.
 const BARE = /^=* ?$/;
 /** Lines that report a single test, so a hung run is cut before any of them. */
@@ -423,10 +414,6 @@ const TEST_LINE = /^(?:.* \.\.\. (?:ok|FAIL|ERROR|skipped|expected failure|unexp
 /** A command whose exit status is not the test runner's: piped, or followed by another command. */
 const SETS_STATUS = /(?<!\|)\|(?!\|)|\|\|\s*true|;\s*\S/;
 
-export function testResults(text: string): boolean {
-  const plain = text.replace(ANSI, "");
-  return UNITTEST_RAN.test(plain) || UNITTEST_INLINE.test(plain) || PYTEST_SUMMARY.test(plain) || SYMPY_SUMMARY.test(plain) || TEST_PASSED.test(plain) || TEST_FAILED.test(plain);
-}
 
 // Pieces of a failing run that can be all an output shows of it, once cut by `head` or `tail` or filtered by `grep`:
 // a unittest failure block's header, its status line, a pytest short-summary line, or a pytest file's progress line

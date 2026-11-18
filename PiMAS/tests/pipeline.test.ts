@@ -16,6 +16,7 @@ import {
 import { runPipeline } from "../src/pipeline.js";
 import { FileTracker, SNAPSHOT_DIR } from "../src/filesystem.js";
 import { createWorkspaceTools, localWorkspace } from "../src/workspace.js";
+import { WATCHDOG_PROBE_COMMAND } from "../src/probe-watchdog.js";
 
 interface ChatRequest {
   messages: { role: string; content: unknown }[];
@@ -404,7 +405,7 @@ test("the bridge relays every workspace command and writes a summary", TIMEOUT, 
   const child = spawn(process.execPath, [
     "--import", pathToFileURL(path.resolve("node_modules/tsx/dist/loader.mjs")).href, path.resolve("src/pipeline-bridge.ts"),
     "--models", app.modelsFile, "--agents", app.agentsFile, "--state", app.state, "--mode", "single",
-    "--snapshot-root", app.workspaceDir, "--watchdog-timeout-ratio", "0.8",
+    "--snapshot-root", app.workspaceDir, "--watchdog", "true",
   ], { cwd: app.root, stdio: ["pipe", "pipe", "pipe"] });
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr += String(chunk); });
@@ -434,7 +435,7 @@ test("the bridge relays every workspace command and writes a summary", TIMEOUT, 
   assert.ok(relayed.some((command) => command.includes("echo 42 > answer.txt")));
   const summary = JSON.parse(await readFile(path.join(app.state, "summary.json"), "utf8"));
   assert.deepEqual(summary.artifacts.map((artifact: { id: string }) => artifact.id), ["solve"]);
-  assert.deepEqual(summary.watchdog, { earlyTimeoutRatio: 0.8, alerts: [], logAlerts: [] });
+  assert.deepEqual(summary.watchdog, { earlyTimeoutRatio: 0.5, alerts: [], logAlerts: [], probe: { flagged: false, requests: [], outcomes: [] } });
 });
 
 test("file tracking reports created, modified, and deleted files and ignores its own manifests", TIMEOUT, async (t) => {
@@ -636,6 +637,52 @@ test("watchdog records early injected timeouts but not a real command timeout", 
   assert.deepEqual(readAlerts, result.watchdog?.logAlerts);
   const injectionIds = events.filter((event) => event.type === "fault").map((event) => event.injection.toolCallId);
   assert.deepEqual([...alerts, ...readAlerts].map((a) => a.toolCallId).sort(), injectionIds.sort());
+});
+
+test("watchdog probes real task failures and persistent test-result faults", { timeout: 100_000 }, async (t) => {
+  for (const correct of [true, false]) {
+    for (const faultAction of [null, "fail", "timeout"] as const) {
+      await t.test(`${correct ? "correct" : "incorrect"} task code, ${faultAction ?? "no fault"}`, async (t) => {
+        const app = await fixture(t, (stage, turn, request) => {
+          if (stage !== "execute") return happyPath(stage, turn, request);
+          const steps: Reply[] = [
+            { tool: "begin_step", args: { stepId: "S1" } },
+            { tool: "write", args: { path: "test_task.py", content: `import unittest\n\nclass TaskTest(unittest.TestCase):\n    def test_task(self):\n        self.assertEqual(${correct ? 42 : 41}, 42)\n` } },
+            ...Array.from({ length: 3 }, () => ({ tool: "bash", args: { command: "python3 -m unittest -v test_task", timeout: 10 } })),
+          ];
+          const requested = request.messages.some((message) => message.role === "user" && JSON.stringify(message.content).includes("Three tool failures or timeouts"));
+          if (turn === steps.length && requested) return { tool: "bash", args: { command: WATCHDOG_PROBE_COMMAND, timeout: 10 } };
+          if (turn === steps.length + (requested ? 1 : 0)) return { tool: "submit_report", args: { summary: "Done", steps: [{ stepId: "S1", status: "done", evidence: "Tests run" }] } };
+          return steps[turn] ?? { text: "done" };
+        });
+        const condition = parseCondition({
+          source: "baseline/trial-1", replay: { research: REPLAYED_RESEARCH, plan: REPLAYED_PLAN },
+          fault: faultAction ? { id: `test-${faultAction}`, class: "accidental", type: faultAction === "timeout" ? "timeout" : "incorrect",
+            target: { kind: "tool", stage: ["execute", "review", "correct"], tool: ["bash", "read"], results: true, after: ["edit", "write"], persistent: true },
+            action: faultAction } : null,
+        });
+        const result = await runPipeline({ directory: app.state, workspace: localWorkspace(app.workspaceDir), modelsFile: app.modelsFile,
+          roles: app.roles, snapshotRoot: null, request: REQUEST, watchdog: {}, condition });
+        assert.equal(result.status, "completed");
+        const probe = result.watchdog!.probe;
+        if (correct && !faultAction) {
+          assert.deepEqual(probe, { flagged: false, requests: [], outcomes: [] });
+          return;
+        }
+        assert.equal(probe.requests.length, 1);
+        assert.equal(probe.requests[0]?.failures, 3);
+        assert.equal(probe.outcomes.length, 1);
+        assert.equal(probe.flagged, !!faultAction);
+        assert.equal(probe.outcomes[0]?.outcome, faultAction ? "failed" : "passed");
+        assert.equal(probe.outcomes[0]?.reason, faultAction === "timeout" ? "timeout" : faultAction === "fail" ? "test_failed" : "passed");
+        const messages = JSON.stringify(app.requests.at(-1)?.messages);
+        assert.match(messages, faultAction ? /test-result path as suspect/ : /probe found no evidence/);
+        const events = (await readFile(result.provenanceFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+        assert.equal(events.filter((event) => event.type === "watchdog_probe_requested").length, 1);
+        assert.equal(events.filter((event) => event.type === "watchdog_probe_result").length, 1);
+      });
+    }
+  }
 });
 
 test("an appended tool fault keeps the real output and status", TIMEOUT, async (t) => {

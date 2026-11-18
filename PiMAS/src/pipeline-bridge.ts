@@ -6,7 +6,6 @@ import { loadAgentConfig } from "./agent-config.js";
 import { parseCondition } from "./faults.js";
 import { runPipeline, type PipelineResult } from "./pipeline.js";
 import type { ExecResult, Workspace } from "./workspace.js";
-import { validateEarlyTimeoutRatio } from "./timeout-watchdog.js";
 
 /**
  * Host-side pipeline process for the Harbor agent. Wire protocol, one JSON object per line:
@@ -65,14 +64,13 @@ async function main(send: Send): Promise<PipelineResult> {
     "snapshot-root": { type: "string", default: "/" },
     // JSON file with replayed stage outputs and at most one fault; see src/faults.ts.
     condition: { type: "string" },
-    "watchdog-timeout-ratio": { type: "string" },
+    watchdog: { type: "string", default: "false" },
   } });
   if (!values.models || !values.agents || !values.state) throw new Error("Provide explicit --models, --agents, and --state");
   if (values.mode !== "pipeline" && values.mode !== "single") throw new Error("--mode must be pipeline or single");
   const maxCorrections = Number(values["max-corrections"]);
   if (!Number.isInteger(maxCorrections) || maxCorrections < 0) throw new Error("--max-corrections must be a non-negative integer");
-  const watchdogRatio = values["watchdog-timeout-ratio"] === undefined ? undefined : Number(values["watchdog-timeout-ratio"]);
-  if (watchdogRatio !== undefined) validateEarlyTimeoutRatio(watchdogRatio);
+  if (values.watchdog !== "true" && values.watchdog !== "false") throw new Error("--watchdog must be true or false");
   const state = path.resolve(values.state);
   await mkdir(state, { recursive: true });
   const { roles } = await loadAgentConfig(path.resolve(values.agents));
@@ -142,7 +140,7 @@ async function main(send: Send): Promise<PipelineResult> {
       maxCorrections,
       snapshotRoot: values["snapshot-root"] === "none" ? null : values["snapshot-root"],
       ...(condition ? { condition } : {}),
-      ...(watchdogRatio === undefined ? {} : { watchdog: { earlyTimeoutRatio: watchdogRatio } }),
+      ...(values.watchdog === "true" ? { watchdog: {} } : {}),
       signal: controller.signal,
     });
     await writeFile(path.join(state, "summary.json"), JSON.stringify(result, null, 2) + "\n");
