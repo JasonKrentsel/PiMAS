@@ -20,6 +20,7 @@ export type WatchdogEvent =
   | { type: "watchdog_early_timeout"; alert: EarlyTimeoutAlert }
   | { type: "watchdog_incomplete_test_log"; alert: IncompleteTestLogAlert }
   | { type: "watchdog_probe_requested"; request: ProbeRequest }
+  | { type: "watchdog_probe_prepared"; request: ProbeRequest; toolCallId: string }
   | { type: "watchdog_probe_result"; outcome: ProbeOutcome };
 
 /** Detectors own their state and inspect observations independently. */

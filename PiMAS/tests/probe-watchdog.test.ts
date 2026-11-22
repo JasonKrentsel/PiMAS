@@ -4,51 +4,81 @@ import { createProbeDetector, WATCHDOG_PROBE_COMMAND } from "../src/probe-watchd
 
 const base = { stageId: "execute", stepId: "S1", toolCallId: "1", tool: "bash", args: {}, isError: true,
   output: "Command exited with code 1", elapsedMs: 1, limits: { defaultSeconds: 600, maxSeconds: 600 } };
-const probe = { ...base, toolCallId: "probe", args: { command: WATCHDOG_PROBE_COMMAND, timeout: 10 } };
+const pass = "test (unittest.case.FunctionTestCase) ... ok\n\nRan 1 test in 0.001s\n\nOK\n";
+const fail = "test (unittest.case.FunctionTestCase) ... FAIL\n\nRan 1 test in 0.001s\n\nFAILED (failures=1)\n";
+const bashProbe = { ...base, toolCallId: "bash-probe", args: { command: WATCHDOG_PROBE_COMMAND, timeout: 10 } };
 
-test("the third mixed failure requests one probe, with no flag before the result", () => {
+function requested() {
   const detector = createProbeDetector();
-  assert.deepEqual(detector.observe(base), []);
-  assert.deepEqual(detector.observe({ ...base, tool: "read", isError: false, output: "Ran 1 test in 0.01s\n\nFAILED (failures=1)" }), []);
-  assert.deepEqual(detector.observe({ ...base, isError: false, output: "ordinary success" }), []);
-  assert.equal(detector.observe({ ...base, toolCallId: "3" })[0]?.type, "watchdog_probe_requested");
-  assert.equal(detector.result.flagged, false);
-  assert.deepEqual(detector.observe({ ...base, toolCallId: "4" }), []);
-  assert.equal(detector.observe({ ...probe, isError: false, output: "Ran 1 test in 0.001s\n\nOK\n" })[0]?.type, "watchdog_probe_result");
-  assert.equal(detector.result.outcomes[0]?.outcome, "passed");
-  assert.equal(detector.result.flagged, false);
-});
+  detector.observe(base); detector.observe(base);
+  const events = detector.observe(base);
+  assert.deepEqual(events.map((event) => event.type), ["watchdog_probe_requested", "watchdog_probe_requested"]);
+  return detector;
+}
+function prepare(detector: ReturnType<typeof createProbeDetector>) {
+  const request = detector.result.requests.find((item) => item.tool === "read")!;
+  detector.observe({ ...base, toolCallId: "prepare", args: { command: request.prepareCommand, timeout: 10 }, isError: false, output: "" });
+  return request;
+}
 
-test("an incomplete test log counts, but a missing runtime or too-short deadline is inconclusive", () => {
-  for (const output of ["python3: command not found", "\nCommand timed out after 1 seconds\n"]) {
-    const detector = createProbeDetector();
-    const log = { ...base, tool: "read", args: { path: "test.log" }, isError: false, output: "=== test session starts ===\n" };
-    detector.observe(log); detector.observe(log); detector.observe(log);
-    detector.observe({ ...probe, args: { ...probe.args, timeout: 1 }, output });
-    assert.equal(detector.result.outcomes[0]?.outcome, "inconclusive");
-    assert.equal(detector.result.flagged, false);
+test("bash and read probes have independent outcomes", () => {
+  for (const badTool of ["bash", "read", null] as const) {
+    const detector = requested();
+    const read = prepare(detector);
+    detector.observe({ ...bashProbe, isError: badTool === "bash", output: badTool === "bash" ? fail : pass });
+    detector.observe({ ...base, tool: "read", toolCallId: "read-probe", args: { path: read.path }, isError: false, output: badTool === "read" ? fail : pass });
+    assert.deepEqual(detector.result.outcomes.map((item) => [item.request.tool, item.outcome]), [
+      ["bash", badTool === "bash" ? "failed" : "passed"], ["read", badTool === "read" ? "failed" : "passed"],
+    ]);
+    assert.equal(detector.result.flagged, badTool !== null);
+    detector.observe(base); detector.observe(base); detector.observe(base);
+    assert.equal(detector.result.requests.length, badTool === null ? 4 : 2);
+    if (badTool === null) {
+      const second = detector.result.requests.filter((item) => item.tool === "read").at(-1)!;
+      assert.notEqual(second.path, read.path);
+      assert.equal(detector.observe({ ...base, args: { command: second.prepareCommand, timeout: 10 }, isError: false, output: "" })[0]?.type, "watchdog_probe_prepared");
+      detector.observe({ ...base, tool: "read", args: { path: second.path }, isError: false, output: pass });
+      assert.equal(detector.result.outcomes.at(-1)?.outcome, "passed");
+    }
   }
 });
 
-test("failed tests in successful bash and read results still count", () => {
-  const detector = createProbeDetector();
-  detector.observe({ ...base, isError: false, output: "test_example (suite.Case) ... FAIL\n" });
-  detector.observe({ ...base, tool: "read", isError: false, output: "tests finished: 1 passed, 1 failed\n" });
-  const events = detector.observe({ ...base, tool: "read", isError: false, output: "1 failed, 3 passed in 0.2s\n" });
-  assert.equal(events[0]?.type, "watchdog_probe_requested");
+test("read probe requires successful preparation and a full read", () => {
+  const noPrep = requested();
+  const request = noPrep.result.requests.find((item) => item.tool === "read")!;
+  assert.deepEqual(noPrep.observe({ ...base, tool: "read", args: { path: request.path }, output: pass, isError: false }), []);
+  noPrep.observe({ ...base, args: { command: request.prepareCommand, timeout: 10 }, output: "python3: command not found" });
+  assert.equal(noPrep.result.outcomes[0]?.reason, "prepare_failed");
+  assert.equal(noPrep.result.flagged, false);
+  const partial = requested();
+  const read = prepare(partial);
+  partial.observe({ ...base, tool: "read", args: { path: read.path, limit: 2 }, isError: false, output: fail });
+  assert.equal(partial.result.outcomes[0]?.reason, "partial_read");
+  assert.equal(partial.result.flagged, false);
 });
 
-test("a failed probe flags once, and an unrun probe remains inconclusive", () => {
-  const detector = createProbeDetector();
-  detector.observe(base); detector.observe(base); detector.observe(base);
-  detector.observe({ ...probe, output: "Ran 1 test in 0.001s\n\nFAILED (failures=1)\n" });
-  assert.equal(detector.result.flagged, true);
-  detector.observe(base); detector.observe(base); detector.observe(base);
-  assert.equal(detector.result.requests.length, 1);
+test("too-short timeouts and unrun probes remain inconclusive", () => {
+  const detector = requested();
+  detector.observe({ ...bashProbe, args: { ...bashProbe.args, timeout: 1 }, output: "Command timed out after 1 seconds" });
+  assert.equal(detector.result.outcomes[0]?.outcome, "inconclusive");
+  assert.deepEqual(detector.endStage("review"), []);
+  assert.equal(detector.endStage("execute")[0]?.outcome.reason, "not_run");
+  assert.equal(detector.result.flagged, false);
+});
 
-  const unrun = createProbeDetector();
-  unrun.observe(base); unrun.observe(base); unrun.observe(base);
-  assert.deepEqual(unrun.endStage("review"), []);
-  assert.equal(unrun.endStage("execute")[0]?.outcome.reason, "not_run");
-  assert.equal(unrun.result.flagged, false);
+test("a complete read missing the prepared test result flags the read path", () => {
+  const detector = requested();
+  const read = prepare(detector);
+  detector.observe({ ...base, tool: "read", args: { path: read.path }, isError: false, output: "" });
+  assert.equal(detector.result.outcomes[0]?.reason, "incomplete_read");
+  assert.equal(detector.result.outcomes[0]?.outcome, "failed");
+  assert.equal(detector.result.flagged, true);
+});
+
+test("failed tests and incomplete logs in bash and read results count", () => {
+  const detector = createProbeDetector();
+  detector.observe({ ...base, isError: false, output: "test_example (suite.Case) ... FAIL\n" });
+  detector.observe({ ...base, tool: "read", args: { path: "test.log" }, isError: false, output: "=== test session starts ===\n" });
+  const events = detector.observe({ ...base, tool: "read", isError: false, output: "1 failed, 3 passed in 0.2s\n" });
+  assert.equal(events.length, 2);
 });

@@ -21,7 +21,7 @@ import {
 import { collectUsage } from "./runtime.js";
 import { shellQuote, type Workspace } from "./workspace.js";
 import { createWatchdog, type WatchdogResult } from "./watchdog.js";
-import { WATCHDOG_PROBE_COMMAND, WATCHDOG_PROBE_PROMPT, probeOutcomeMessage } from "./probe-watchdog.js";
+import { probePrompt, probeOutcomeMessage } from "./probe-watchdog.js";
 
 /**
  * Fixed-topology alternative to TaskRun: host code, not an orchestrator model, decides
@@ -321,6 +321,7 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
         void log.record({ type: "tool_call", stageId: spec.id, call });
         let probeRequested = false;
         let probeCompleted = false;
+        let probePrepared = false;
         if (context.watchdog && start) {
           const events = context.watchdog.observe({
             stageId: spec.id, stepId: call.stepId, toolCallId: call.toolCallId, tool: call.tool,
@@ -332,7 +333,9 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
             void log.record(watchdogEvent);
             if (watchdogEvent.type === "watchdog_probe_requested") {
               probeRequested = true;
-              active.agent.steer({ role: "user", content: [{ type: "text", text: WATCHDOG_PROBE_PROMPT }], timestamp: Date.now() });
+              active.agent.steer({ role: "user", content: [{ type: "text", text: probePrompt(watchdogEvent.request) }], timestamp: Date.now() });
+            } else if (watchdogEvent.type === "watchdog_probe_prepared") {
+              probePrepared = true;
             } else if (watchdogEvent.type === "watchdog_probe_result") {
               probeCompleted = true;
               active.agent.steer({ role: "user", content: [{ type: "text", text: probeOutcomeMessage(watchdogEvent.outcome) }], timestamp: Date.now() });
@@ -348,8 +351,7 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
         // The hard cap also stops a model that keeps resubmitting.
         const nonSubmit = event.toolName !== submitName;
         if (nonSubmit) spent++;
-        const isProbe = event.toolName === "bash" && (start?.args as { command?: unknown } | undefined)?.command === WATCHDOG_PROBE_COMMAND;
-        if (((nonSubmit && spent > budget) || ++total > budget + SUBMIT_ALLOWANCE) && !probeRequested && !(isProbe && probeCompleted)) {
+        if (((nonSubmit && spent > budget) || ++total > budget + SUBMIT_ALLOWANCE) && !probeRequested && !probePrepared && !probeCompleted) {
           overBudget = true;
           void active.abort();
         }
