@@ -6,6 +6,7 @@ import type { AgentRole } from "./agent-config.js";
 import type { FaultInjection } from "./faults.js";
 import type { FileChanges } from "./filesystem.js";
 import type { WatchdogEvent } from "./watchdog-types.js";
+import type { VerificationRequest, VerificationResult } from "./verification.js";
 
 export type StageName = "research" | "plan" | "execute" | "review" | "correct" | "solve";
 
@@ -94,6 +95,7 @@ export type ProvenanceEvent =
   | { type: "step_files"; stageId: string; segment: StepFileChanges }
   | { type: "fault"; injection: FaultInjection }
   | WatchdogEvent
+  | { type: "independent_verification"; stageId: string; request: VerificationRequest | null; result: VerificationResult }
   | { type: "stage_end"; artifact: StageArtifact }
   | { type: "run_end"; status: string; durationMs: number };
 

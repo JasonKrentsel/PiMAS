@@ -6,6 +6,7 @@ import { loadAgentConfig } from "./agent-config.js";
 import { parseCondition } from "./faults.js";
 import { runPipeline, type PipelineResult } from "./pipeline.js";
 import type { ExecResult, Workspace } from "./workspace.js";
+import type { VerificationRequest, VerificationResult } from "./verification.js";
 
 /**
  * Host-side pipeline process for the Harbor agent. Wire protocol, one JSON object per line:
@@ -65,12 +66,15 @@ async function main(send: Send): Promise<PipelineResult> {
     // JSON file with replayed stage outputs and at most one fault; see src/faults.ts.
     condition: { type: "string" },
     watchdog: { type: "string", default: "false" },
+    verify: { type: "string", default: "false" },
   } });
   if (!values.models || !values.agents || !values.state) throw new Error("Provide explicit --models, --agents, and --state");
   if (values.mode !== "pipeline" && values.mode !== "single") throw new Error("--mode must be pipeline or single");
   const maxCorrections = Number(values["max-corrections"]);
   if (!Number.isInteger(maxCorrections) || maxCorrections < 0) throw new Error("--max-corrections must be a non-negative integer");
   if (values.watchdog !== "true" && values.watchdog !== "false") throw new Error("--watchdog must be true or false");
+  if (values.verify !== "true" && values.verify !== "false") throw new Error("--verify must be true or false");
+  if (values.verify === "true" && values.watchdog !== "true") throw new Error("--verify requires --watchdog true");
   const state = path.resolve(values.state);
   await mkdir(state, { recursive: true });
   const { roles } = await loadAgentConfig(path.resolve(values.agents));
@@ -78,6 +82,8 @@ async function main(send: Send): Promise<PipelineResult> {
   const condition = values.condition ? parseCondition(JSON.parse(await readFile(path.resolve(values.condition), "utf8"))) : undefined;
 
   const pending = new Map<number, PendingExec>();
+  const verifications = new Map<number, { resolve: (result: VerificationResult) => void; reject: (error: Error) => void }>();
+  let nextVerificationId = 1;
   let task: { prompt: string; cwd: string } | undefined;
   let taskReady!: () => void;
   let inputFailed!: (error: Error) => void;
@@ -86,6 +92,8 @@ async function main(send: Send): Promise<PipelineResult> {
   const closePending = (error: Error) => {
     for (const entry of pending.values()) entry.reject(error);
     pending.clear();
+    for (const entry of verifications.values()) entry.reject(error);
+    verifications.clear();
   };
   input.on("line", (line) => {
     try {
@@ -104,6 +112,14 @@ async function main(send: Send): Promise<PipelineResult> {
           stdout: typeof message.stdout === "string" ? message.stdout : "",
           stderr: typeof message.stderr === "string" ? message.stderr : "",
         });
+      } else if (message.type === "verification_result" && typeof message.id === "number") {
+        const entry = verifications.get(message.id);
+        if (entry) {
+          const result = record(message.result);
+          if (result.status !== "completed" && result.status !== "inconclusive") throw new Error("Invalid verification status");
+          verifications.delete(message.id);
+          entry.resolve(result as unknown as VerificationResult);
+        }
       } else {
         throw new Error(`Unexpected relay message type ${String(message.type)}`);
       }
@@ -141,6 +157,19 @@ async function main(send: Send): Promise<PipelineResult> {
       snapshotRoot: values["snapshot-root"] === "none" ? null : values["snapshot-root"],
       ...(condition ? { condition } : {}),
       ...(values.watchdog === "true" ? { watchdog: {} } : {}),
+      ...(values.verify === "true" ? { verifyTest: (request: VerificationRequest, signal?: AbortSignal) => {
+        const id = nextVerificationId++;
+        return new Promise<VerificationResult>((resolve, reject) => {
+          if (controller.signal.aborted || signal?.aborted) return reject(new Error("Verification aborted"));
+          const onAbort = () => { verifications.delete(id); send({ type: "cancel_verification", id }); reject(new Error("Verification aborted")); };
+          signal?.addEventListener("abort", onAbort, { once: true });
+          verifications.set(id, {
+            resolve: (result) => { signal?.removeEventListener("abort", onAbort); resolve(result); },
+            reject: (error) => { signal?.removeEventListener("abort", onAbort); reject(error); },
+          });
+          send({ type: "verify", id, request });
+        });
+      } } : {}),
       signal: controller.signal,
     });
     await writeFile(path.join(state, "summary.json"), JSON.stringify(result, null, 2) + "\n");

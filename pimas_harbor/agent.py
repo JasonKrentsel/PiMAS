@@ -20,7 +20,8 @@ environment:
     PIMAS_RUN_SNAPSHOT     0 skips the whole-container manifests before and after the run (default: 1)
     PIMAS_CONDITIONS       directory of per-task condition files, <task>.json, giving replayed stage
                            outputs and at most one fault (default: none). A task without a file fails.
-    PIMAS_WATCHDOG         true enables the observation-only watchdog (default: false).
+    PIMAS_WATCHDOG         true enables watchdog probes and on-demand verification (default: false).
+    PIMAS_VERIFICATION_CONFIG  Optional JSON file with extra snapshot paths and state export hooks.
     PIMAS_OFFLINE          1 disconnects the task container from its networks while the agent works, so
                            it cannot fetch the upstream fix; they are reconnected for grading. Docker
                            environments only; a container that still reaches the internet fails the trial.
@@ -48,6 +49,7 @@ from harbor.models.agent.context import AgentContext
 
 from pimas_harbor.provenance import read_events, run_status, session_usage, stage_summaries
 from pimas_harbor.records import RunFilesystem, code_identity, now, snapshot_config, write_run_info
+from pimas_harbor.verification.manager import VerificationManager
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # Margin on top of the in-container `timeout` so Harbor's own exec timeout fires last.
@@ -80,6 +82,7 @@ class PimasAgent(BaseAgent):
             "run_snapshot": self._setting("PIMAS_RUN_SNAPSHOT", "1"),
             "conditions": self._setting("PIMAS_CONDITIONS", ""),
             "watchdog": self._setting("PIMAS_WATCHDOG", "false"),
+            "verification_config": self._setting("PIMAS_VERIFICATION_CONFIG", ""),
             "offline": self._setting("PIMAS_OFFLINE", "0"),
         }
 
@@ -120,6 +123,7 @@ class PimasAgent(BaseAgent):
         if settings["watchdog"] not in ("true", "false"):
             raise ValueError("PIMAS_WATCHDOG must be true or false")
         command += ["--watchdog", settings["watchdog"]]
+        command += ["--verify", settings["watchdog"]]
         condition = self._condition_file()
         if condition:
             command += ["--condition", str(condition)]
@@ -136,6 +140,9 @@ class PimasAgent(BaseAgent):
         command, root = self._bridge_command(state)
         _, models, agents = self._paths()
         settings = self._settings()
+        verifier_config = Path(settings["verification_config"]).read_text() if settings["watchdog"] == "true" and settings["verification_config"] else ""
+        verifier = VerificationManager(environment, state, cwd, config=verifier_config,
+                                       offline=settings["offline"] not in ("0", "false", "False")) if settings["watchdog"] == "true" else None
         info: dict[str, Any] = {
             "schema_version": 1,
             "agent": {"name": self.name(), "version": self.version()},
@@ -146,6 +153,7 @@ class PimasAgent(BaseAgent):
             "code": code_identity(root),
             "settings": settings,
             "condition": _file_identity(self._condition_file()),
+            "verification_config": _file_identity(Path(settings["verification_config"])) if verifier and settings["verification_config"] else None,
             "bridge_command": command,
             "config": snapshot_config(state, models, agents),
             "workspace_cwd": cwd,
@@ -181,7 +189,7 @@ class PimasAgent(BaseAgent):
             start_new_session=True,
             limit=64 * 1024 * 1024,
         )
-        relay = _Relay(process, environment, has_timeout)
+        relay = _Relay(process, environment, has_timeout, verifier)
         finished = False
         try:
             await relay.send({"type": "task", "prompt": instruction, "cwd": cwd})
@@ -234,11 +242,14 @@ def _file_identity(file: Path | None) -> dict[str, str] | None:
 class _Relay:
     """Runs the bridge's exec requests in the task container, concurrently, until `done`."""
 
-    def __init__(self, process: asyncio.subprocess.Process, environment: BaseEnvironment, has_timeout: bool):
+    def __init__(self, process: asyncio.subprocess.Process, environment: BaseEnvironment, has_timeout: bool,
+                 verifier: VerificationManager | None = None):
         self.process = process
         self.environment = environment
         self.has_timeout = has_timeout
+        self.verifier = verifier
         self.tasks: dict[int, asyncio.Task[None]] = {}
+        self.verifications: dict[int, asyncio.Task[None]] = {}
         self.done_status: str | None = None
         self.write_lock = asyncio.Lock()
 
@@ -263,11 +274,36 @@ class _Relay:
                 task = self.tasks.pop(int(message["id"]), None)
                 if task:
                     task.cancel()
+            elif kind == "verify":
+                request_id = int(message["id"])
+                if request_id in self.verifications:
+                    raise RuntimeError(f"Duplicate verification request {request_id}")
+                self.verifications[request_id] = asyncio.create_task(self._verify(request_id, message))
+            elif kind == "cancel_verification":
+                task = self.verifications.get(int(message["id"]))
+                if task:
+                    task.cancel()
             elif kind == "done":
                 self.done_status = str(message.get("status"))
                 return
             else:
                 raise RuntimeError(f"Unexpected bridge message: {kind!r}")
+
+    async def _verify(self, request_id: int, message: dict[str, Any]) -> None:
+        try:
+            request = message.get("request")
+            if not self.verifier or not isinstance(request, dict):
+                result = {"status": "inconclusive", "reason": "Verifier unavailable or invalid request"}
+            else:
+                try:
+                    result = await self.verifier.verify(request)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # The agent must never wait indefinitely for a failed verifier.
+                    result = {"status": "inconclusive", "reason": f"Verifier failed: {type(error).__name__}: {error}"}
+            await self.send({"type": "verification_result", "id": request_id, "result": result})
+        finally:
+            self.verifications.pop(request_id, None)
 
     async def _exec(self, request_id: int, message: dict[str, Any]) -> None:
         command = str(message["command"])
@@ -297,11 +333,13 @@ class _Relay:
         await self.send({"type": "exec_result", "id": request_id, **reply})
 
     async def close(self) -> None:
-        for task in list(self.tasks.values()):
+        pending = [*self.tasks.values(), *self.verifications.values()]
+        for task in pending:
             task.cancel()
-        if self.tasks:
-            await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         self.tasks.clear()
+        self.verifications.clear()
 
 
 # Succeeds only if the container can resolve a name or reach a public address.

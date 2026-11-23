@@ -169,5 +169,34 @@ class AgentRelayTest(unittest.TestCase):
                 ])
 
 
+@unittest.skipIf(PimasAgent is None, "Harbor is not installed")
+class VerificationRelayTest(unittest.IsolatedAsyncioTestCase):
+    async def test_verification_request_is_returned_to_bridge(self):
+        from pimas_harbor.agent import _Relay
+        script = '''import json, sys
+print(json.dumps({"type":"verify","id":7,"request":{"tests":[{"command":"pytest one","timeout":10},{"command":"pytest two","timeout":10}]}}), flush=True)
+reply = json.loads(sys.stdin.readline())
+assert reply["type"] == "verification_result" and reply["id"] == 7
+assert [test["exit_code"] for test in reply["result"]["tests"]] == [0, 1]
+print(json.dumps({"type":"done","status":"completed"}), flush=True)
+'''
+        process = await asyncio.create_subprocess_exec(sys.executable, '-c', script, stdin=asyncio.subprocess.PIPE,
+                                                       stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        class FakeVerifier:
+            async def verify(self, request):
+                self.request = request
+                return {'status': 'completed', 'tests': [{'exit_code': 0}, {'exit_code': 1}]}
+        verifier = FakeVerifier()
+        relay = _Relay(process, None, False, verifier)
+        try:
+            await asyncio.wait_for(relay.serve(), 5)
+            self.assertEqual(relay.done_status, 'completed')
+            self.assertEqual([test['command'] for test in verifier.request['tests']], ['pytest one', 'pytest two'])
+        finally:
+            await relay.close()
+            await process.wait()
+        self.assertEqual(process.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

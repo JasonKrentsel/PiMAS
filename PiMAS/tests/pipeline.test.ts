@@ -1135,3 +1135,160 @@ test("conditions that could silently run clean or misfire are rejected", () => {
   const control: Condition = parseCondition({ ...base, fault: null });
   assert.equal(control.fault, null);
 });
+
+test("a failed watchdog probe waits for independent verification and returns its result", TIMEOUT, async (t) => {
+  const app = await fixture(t, (stage, turn) => {
+    if (stage !== "execute") return { text: "done" };
+    const steps: Reply[] = [
+      { tool: "begin_step", args: { stepId: "S1" } },
+      { tool: "write", args: { path: "test_task.py", content: "import unittest\nclass T(unittest.TestCase):\n def test_ok(self): self.assertTrue(True)\n" } },
+      ...Array.from({ length: 3 }, () => ({ tool: "bash", args: { command: "python3 -m unittest -v test_task", timeout: 10 } })),
+    ];
+    if (turn === steps.length) return { tool: "bash", args: { command: WATCHDOG_PROBE_COMMAND, timeout: 10 } };
+    if (turn === steps.length + 1) return { tool: "submit_report", args: { summary: "Verified", steps: [{ stepId: "S1", status: "done", evidence: "independent test" }] } };
+    return steps[turn] ?? { text: "done" };
+  });
+  const condition = parseCondition({ source: "test", replay: { research: REPLAYED_RESEARCH, plan: REPLAYED_PLAN },
+    fault: { id: "false-fail", class: "accidental", type: "incorrect", target: { kind: "tool", stage: "execute", tool: "bash", results: true, after: ["write"], persistent: true }, action: "fail" } });
+  let unblock!: () => void;
+  let reached!: () => void;
+  const waiting = new Promise<void>((resolve) => { reached = resolve; });
+  const release = new Promise<void>((resolve) => { unblock = resolve; });
+  let calls = 0;
+  const run = runPipeline({ directory: app.state, workspace: localWorkspace(app.workspaceDir), modelsFile: app.modelsFile,
+    roles: app.roles, snapshotRoot: null, request: REQUEST, watchdog: {}, condition,
+    verifyTest: async (request) => {
+      calls++;
+      assert.equal(request.tests[0]?.command, "python3 -m unittest -v test_task");
+      assert.equal(request.probe.outcome, "failed");
+      reached();
+      await release;
+      return { status: "completed", snapshot: { sha256: "test-snapshot", bytes: 12, paths: ["/app"] }, tests: request.tests.map((test) => ({ ...test, status: "completed", exit_code: 0, stdout: "OK", stderr: "" })) };
+    },
+  });
+  await waiting;
+  const requestCount = app.requests.length;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(app.requests.length, requestCount, "the model must wait for verification");
+  unblock();
+  const result = await run;
+  assert.equal(result.status, "completed");
+  assert.equal(calls, 1);
+  assert.match(JSON.stringify(app.requests.at(-1)?.messages), /Independent verification of snapshot test-snapshot completed/);
+  const events = (await readFile(result.provenanceFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(events.filter((event) => event.type === "independent_verification").length, 1);
+});
+
+test("the bridge sends a failed probe to the verifier relay and resumes with its reply", TIMEOUT, async (t) => {
+  const commands = ["python3 -m unittest -v test_task", "python3 -m unittest test_task", "python3 -m unittest discover -p test_task.py"];
+  const app = await fixture(t, (stage, turn) => {
+    if (stage !== "execute") return { text: "done" };
+    const steps: Reply[] = [
+      { tool: "begin_step", args: { stepId: "S1" } },
+      { tool: "write", args: { path: "test_task.py", content: "import unittest\nclass T(unittest.TestCase):\n def test_ok(self): self.assertTrue(True)\n" } },
+      ...commands.map((command) => ({ tool: "bash", args: { command, timeout: 10 } })),
+      { tool: "bash", args: { command: WATCHDOG_PROBE_COMMAND, timeout: 10 } },
+      { tool: "submit_report", args: { summary: "Verified", steps: [{ stepId: "S1", status: "done", evidence: "test" }] } },
+    ];
+    return steps[turn] ?? { text: "done" };
+  });
+  const conditionFile = path.join(app.root, "condition.json");
+  await writeFile(conditionFile, JSON.stringify({ source: "test", replay: { research: REPLAYED_RESEARCH, plan: REPLAYED_PLAN },
+    fault: { id: "false-fail", class: "accidental", type: "incorrect", target: { kind: "tool", stage: "execute", tool: "bash", results: true, after: ["write"], persistent: true }, action: "fail" } }));
+  const child = spawn(process.execPath, ["--import", pathToFileURL(path.resolve("node_modules/tsx/dist/loader.mjs")).href,
+    path.resolve("src/pipeline-bridge.ts"), "--models", app.modelsFile, "--agents", app.agentsFile, "--state", app.state,
+    "--condition", conditionFile, "--snapshot-root", "none", "--watchdog", "true", "--verify", "true"],
+    { cwd: app.root, stdio: ["pipe", "pipe", "pipe"] });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+  const timer = setTimeout(() => child.kill(), 25_000);
+  t.after(() => { clearTimeout(timer); child.kill(); });
+  const workspace = localWorkspace(app.workspaceDir);
+  let verified = false;
+  let done: Record<string, unknown> | undefined;
+  child.stdin.write(JSON.stringify({ type: "task", prompt: "Test", cwd: app.workspaceDir }) + "\n");
+  for await (const line of createInterface({ input: child.stdout })) {
+    const message = JSON.parse(line);
+    if (message.type === "done") { done = message; break; }
+    if (message.type === "verify") {
+      assert.deepEqual(message.request.tests.map((test: { command: string }) => test.command), commands);
+      verified = true;
+      child.stdin.write(JSON.stringify({ type: "verification_result", id: message.id, result: {
+        status: "completed", snapshot: { sha256: "snapshot", bytes: 5, paths: [] }, tests: message.request.tests.map((test: object) => ({ ...test, status: "completed", exit_code: 0, stdout: "OK", stderr: "" })),
+      } }) + "\n");
+    } else if (message.type === "exec") {
+      const result = await workspace.exec(String(message.command), message.timeout ? { timeoutSeconds: Number(message.timeout) } : {});
+      child.stdin.write(JSON.stringify({ type: "exec_result", id: message.id, exit_code: result.exitCode, stdout: result.stdout, stderr: result.stderr }) + "\n");
+    } else assert.fail(`unexpected message ${message.type}`);
+  }
+  child.stdin.end();
+  await once(child, "close");
+  assert.equal(verified, true, stderr);
+  assert.deepEqual(done, { type: "done", status: "completed" }, stderr);
+  assert.match(JSON.stringify(app.requests.at(-1)?.messages), /Independent verification of snapshot snapshot completed/);
+  for (const command of commands) assert.ok(JSON.stringify(app.requests.at(-1)?.messages).includes(command));
+});
+
+test("an unidentified test can be supplied with extra snapshot paths after a failed probe", TIMEOUT, async (t) => {
+  const app = await fixture(t, (stage, turn) => {
+    if (stage !== "execute") return { text: "done" };
+    const steps: Reply[] = [
+      { tool: "begin_step", args: { stepId: "S1" } },
+      ...Array.from({ length: 3 }, () => ({ tool: "bash", args: { command: "exit 2" } })),
+      { tool: "bash", args: { command: WATCHDOG_PROBE_COMMAND, timeout: 10 } },
+      { tool: "verify_test", args: { command: "python3 custom_check.py", timeout: 10, paths: ["/opt/fixture"] } },
+      { tool: "submit_report", args: { summary: "Checked", steps: [{ stepId: "S1", status: "done", evidence: "verified" }] } },
+    ];
+    return steps[turn] ?? { text: "done" };
+  });
+  const condition = parseCondition({ source: "test", replay: { research: REPLAYED_RESEARCH, plan: REPLAYED_PLAN },
+    fault: { id: "bad-probe", class: "accidental", type: "incorrect", target: { kind: "tool", stage: "execute", tool: "bash", match: "python3 -I", persistent: true }, action: "replace", isError: true, text: "test_x ... FAIL\nFAILED (failures=1)" } });
+  let calls = 0;
+  const result = await runPipeline({ directory: app.state, workspace: localWorkspace(app.workspaceDir), modelsFile: app.modelsFile,
+    roles: app.roles, snapshotRoot: null, request: REQUEST, watchdog: {}, condition,
+    verifyTest: async (request) => {
+      calls++;
+      assert.equal(request.tests[0]?.command, "python3 custom_check.py");
+      assert.deepEqual(request.paths, ["/opt/fixture"]);
+      return { status: "completed", tests: request.tests.map((test) => ({ ...test, status: "completed", exit_code: 0, stdout: "ok", stderr: "" })) };
+    },
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(calls, 1);
+  assert.match(JSON.stringify(app.requests.at(-1)?.messages), /Independent verification/);
+});
+
+test("a failed probe verifies every distinct failed test and returns individual results", TIMEOUT, async (t) => {
+  const commands = ["python3 -m unittest -v test_task", "python3 -m unittest test_task", "python3 -m unittest discover -p test_task.py"];
+  const app = await fixture(t, (stage, turn) => {
+    if (stage !== "execute") return { text: "done" };
+    const steps: Reply[] = [
+      { tool: "begin_step", args: { stepId: "S1" } },
+      { tool: "write", args: { path: "test_task.py", content: "import unittest\nclass T(unittest.TestCase):\n def test_ok(self): self.assertTrue(True)\n" } },
+      ...commands.map((command) => ({ tool: "bash", args: { command, timeout: 10 } })),
+      { tool: "bash", args: { command: WATCHDOG_PROBE_COMMAND, timeout: 10 } },
+      { tool: "submit_report", args: { summary: "Checked", steps: [{ stepId: "S1", status: "done", evidence: "verified" }] } },
+    ];
+    return steps[turn] ?? { text: "done" };
+  });
+  const condition = parseCondition({ source: "test", replay: { research: REPLAYED_RESEARCH, plan: REPLAYED_PLAN },
+    fault: { id: "false-fail", class: "accidental", type: "incorrect", target: { kind: "tool", stage: "execute", tool: "bash", results: true, after: ["write"], persistent: true }, action: "fail" } });
+  let calls = 0;
+  const result = await runPipeline({ directory: app.state, workspace: localWorkspace(app.workspaceDir), modelsFile: app.modelsFile,
+    roles: app.roles, snapshotRoot: null, request: REQUEST, watchdog: {}, condition,
+    verifyTest: async (request) => {
+      calls++;
+      assert.deepEqual(request.tests.map((test) => test.command), commands);
+      return { status: "inconclusive", reason: "One or more test results are inconclusive.", tests: request.tests.map((test, i) => i === 1
+        ? { ...test, status: "inconclusive", reason: "timeout" }
+        : { ...test, status: "completed", exit_code: i === 0 ? 0 : 1, stdout: `result ${i}`, stderr: "" }) };
+    },
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(calls, 1);
+  const messages = JSON.stringify(app.requests.at(-1)?.messages);
+  for (const command of commands) assert.ok(messages.includes(command));
+  assert.match(messages, /Inconclusive: timeout/);
+  assert.match(messages, /Exit code: 0/);
+  assert.match(messages, /Exit code: 1/);
+});

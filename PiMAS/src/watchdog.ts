@@ -6,9 +6,9 @@ import { createProbeDetector } from "./probe-watchdog.js";
 export type WatchdogResult = TimeoutDetectorResult & { probe: ReturnType<typeof createProbeDetector>["result"] };
 
 /** Dispatch observed tool results to the registered detectors. */
-export function createWatchdog(options: { earlyTimeoutRatio?: number } = {}) {
+export function createWatchdog(options: { earlyTimeoutRatio?: number; repeatAfterFlag?: boolean } = {}) {
   const timeout = createTimeoutDetector(options);
-  const probe = createProbeDetector();
+  const probe = createProbeDetector(options);
   const detectors: WatchdogDetector[] = [timeout, probe];
   return {
     result: { ...timeout.result, probe: probe.result },

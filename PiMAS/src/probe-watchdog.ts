@@ -42,7 +42,7 @@ export interface ProbeOutcome {
 const nativeTools = new Set(["read", "grep", "find", "ls", "edit", "write", "bash"]);
 const failedTest = /(?:^|\n)(?:FAILED \((?:failures|errors)=|\S+::\S+ (?:FAILED|ERROR)\b|(?:FAILED|ERROR) \S+::\S+|.* \.\.\. (?:FAIL|ERROR)\b|.*\b\d+ (?:failed|errors?)\b.* in [\d.]+ ?s\b|.*tests finished:.*\b\d+ (?:failed|exceptions?)\b)/m;
 
-export function createProbeDetector() {
+export function createProbeDetector(options: { repeatAfterFlag?: boolean } = {}) {
   const result: { flagged: boolean; requests: ProbeRequest[]; outcomes: ProbeOutcome[] } = { flagged: false, requests: [], outcomes: [] };
   let failures = 0;
   let sawTimeout = false;
@@ -88,7 +88,7 @@ export function createProbeDetector() {
         const reason = partial ? "partial_read" : timeout ? "timeout" : fail ? "test_failed" : passed ? "passed" : incomplete ? "incomplete_read" : "unrecognized_result";
         return [finish({ request, toolCallId: input.toolCallId, outcome: timeout || fail || incomplete ? "failed" : passed ? "passed" : "inconclusive", reason })];
       }
-      if (requested || result.flagged || !nativeTools.has(input.tool)) return [];
+      if (requested || (result.flagged && !options.repeatAfterFlag) || !nativeTools.has(input.tool)) return [];
       const incompleteLog = incompleteTestLogAlert({ ...input, sawTimeout }) !== null;
       const isFailure = input.isError || incompleteLog || ((input.tool === "read" || input.tool === "bash") && failedTest.test(input.output.replace(/\x1b\[[0-9;]*m/g, "")));
       if (!isFailure || ++failures < 3) return [];

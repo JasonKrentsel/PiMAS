@@ -22,6 +22,8 @@ import { collectUsage } from "./runtime.js";
 import { shellQuote, type Workspace } from "./workspace.js";
 import { createWatchdog, type WatchdogResult } from "./watchdog.js";
 import { probePrompt, probeOutcomeMessage } from "./probe-watchdog.js";
+import { TestCommandTracker, verificationMessage, type VerificationRequest, type VerificationResult } from "./verification.js";
+import type { ProbeOutcome } from "./probe-watchdog.js";
 
 /**
  * Fixed-topology alternative to TaskRun: host code, not an orchestrator model, decides
@@ -49,6 +51,8 @@ export interface PipelineOptions {
   condition?: Condition;
   /** Opt in to the watchdog and its agent-directed diagnostic probe. */
   watchdog?: { earlyTimeoutRatio?: number };
+  /** An independent verifier; only invoked after a failed watchdog probe. */
+  verifyTest?: (request: VerificationRequest, signal?: AbortSignal) => Promise<VerificationResult>;
   signal?: AbortSignal;
 }
 
@@ -84,7 +88,7 @@ const SUBMIT_ALLOWANCE = 10;
 
 export async function runPipeline(options: PipelineOptions): Promise<PipelineResult> {
   const mode = options.mode ?? "pipeline";
-  const watchdog = options.watchdog === undefined ? undefined : createWatchdog(options.watchdog);
+  const watchdog = options.watchdog === undefined ? undefined : createWatchdog({ ...options.watchdog, repeatAfterFlag: !!options.verifyTest });
   const review = options.review ?? false;
   if (mode === "pipeline" && !options.roles.researcher) {
     throw new Error("The pipeline needs a researcher profile in the agents configuration");
@@ -105,7 +109,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     void log.record({ type: "fault", injection: record });
   };
   const toolFaults = faultTools(fault, injected, (options.commandLimits ?? PIPELINE_COMMAND_LIMITS).defaultSeconds, options.workspace);
-  const context: StageContext = { options, log, artifacts, tracker, fault, injected, toolFaults, watchdog };
+  const context: StageContext = { options, log, artifacts, tracker, fault, injected, toolFaults, watchdog, testCommands: new TestCommandTracker() };
   // Everything that shapes agent behavior, so a later reader can tell runs apart.
   const settings = {
     workspaceCwd: options.workspace.cwd,
@@ -214,6 +218,7 @@ interface StageContext {
   injected: (record: FaultInjection) => void;
   toolFaults: ToolFaults;
   watchdog?: ReturnType<typeof createWatchdog>;
+  testCommands: TestCommandTracker;
 }
 
 interface StageSpec<T> {
@@ -272,6 +277,31 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
     await log.record({ type: "step_files", stageId: spec.id, segment });
   };
   const tools = [spec.submitTool((value) => { submission = value; })];
+  let failedProbe: ProbeOutcome | undefined;
+  let manualVerifications = 0;
+  if (options.verifyTest && context.watchdog && spec.toolset !== "none") {
+    tools.push(defineTool({
+      name: "verify_test", label: "Verify test independently",
+      description: "After a watchdog flags a test-result fault, rerun all recorded failed tests in an independent environment. Optionally add test commands and paths needed by those tests. Limited to two manual requests per stage.",
+      parameters: Type.Object({ command: Type.Optional(Type.String({ minLength: 1 })), commands: Type.Optional(Type.Array(Type.String({ minLength: 1 }))), timeout: Type.Optional(Type.Number({ minimum: 1, maximum: 3600 })), paths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 8 })) }),
+      executionMode: "sequential",
+      async execute(toolCallId, params, signal) {
+        if (!failedProbe) return { content: [{ type: "text", text: "No failed watchdog probe has authorized independent verification in this stage." }], details: {} };
+        if (++manualVerifications > 2) return { content: [{ type: "text", text: "Independent verification retry limit reached for this stage." }], details: {} };
+        const limits = options.commandLimits ?? PIPELINE_COMMAND_LIMITS;
+        const tests = context.testCommands.request(failedProbe)?.tests ?? [];
+        const added = [...(params.command ? [params.command] : []), ...(params.commands ?? [])];
+        for (const command of added) if (!tests.some((test) => test.command === command)) tests.push({ stageId: spec.id, toolCallId, command, timeout: Math.min(params.timeout ?? limits.defaultSeconds, limits.maxSeconds) });
+        if (!tests.length) return { content: [{ type: "text", text: "No failed test commands were identified; provide command or commands." }], details: {} };
+        const request: VerificationRequest = { stageId: spec.id, toolCallId, tests, paths: params.paths, probe: failedProbe };
+        let result: VerificationResult;
+        try { result = await options.verifyTest!(request, signal); }
+        catch (caught) { result = { status: "inconclusive", reason: caught instanceof Error ? caught.message : String(caught) }; }
+        await log.record({ type: "independent_verification", stageId: spec.id, request, result });
+        return { content: [{ type: "text", text: verificationMessage(result) }], details: result };
+      },
+    }) as unknown as ToolDefinition);
+  }
   if (spec.stepTracking) {
     tools.push(beginStepTool(spec.stepTracking, async (stepId) => {
       if (stepFileChanges && tracker) await closeStep(await timed(() => tracker.snapshot()));
@@ -282,7 +312,12 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
   const toolCalls: ToolCallRecord[] = [];
   let session: AgentSession | undefined;
   let error: string | null = null;
+  const testCommands = context.testCommands;
+  let verificationHandled = false;
+  let automaticVerifications = 0;
+  const watchdogCalls = new Map<string, { requested: boolean; prepared: boolean; completed: boolean }>();
   try {
+    const faultWrapper = context.toolFaults(spec.stage, spec.id, () => currentStep);
     session = await createRoleSession({
       cwd: options.workspace.cwd,
       modelsFile: options.modelsFile,
@@ -293,7 +328,57 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
       toolset: spec.toolset,
       workspace: options.workspace,
       commandLimits: options.commandLimits ?? PIPELINE_COMMAND_LIMITS,
-      wrapTool: context.toolFaults(spec.stage, spec.id, () => currentStep),
+      wrapTool: (native) => {
+        const tool = faultWrapper?.(native) ?? native;
+        if (!options.verifyTest || !context.watchdog) return tool;
+        return {
+          ...tool,
+          executionMode: "sequential",
+          async execute(toolCallId, params, signal, onUpdate, ctx) {
+            const started = performance.now();
+            let output: Awaited<ReturnType<ToolDefinition["execute"]>> | undefined;
+            let failure: unknown;
+            try { output = await tool.execute(toolCallId, params, signal, onUpdate, ctx); }
+            catch (caught) { failure = caught; }
+            const text = failure === undefined ? resultText(output) : (failure instanceof Error ? failure.message : String(failure));
+            const isError = failure !== undefined || (output as { isError?: boolean } | undefined)?.isError === true;
+            const limits = options.commandLimits ?? PIPELINE_COMMAND_LIMITS;
+            testCommands.observe({ stageId: spec.id, toolCallId, tool: tool.name, args: params, output: text, isError, defaultTimeout: limits.defaultSeconds, maxTimeout: limits.maxSeconds });
+            const events = context.watchdog!.observe({ stageId: spec.id, stepId: currentStep, toolCallId, tool: tool.name, args: params, isError, output: text, elapsedMs: performance.now() - started, limits });
+            watchdogCalls.set(toolCallId, { requested: events.some((event) => event.type === "watchdog_probe_requested"), prepared: events.some((event) => event.type === "watchdog_probe_prepared"), completed: events.some((event) => event.type === "watchdog_probe_result") });
+            let advisory = "";
+            for (const event of events) {
+              await log.record(event);
+              if (event.type === "watchdog_probe_requested") {
+                verificationHandled = false;
+                session?.agent.steer({ role: "user", content: [{ type: "text", text: probePrompt(event.request) }], timestamp: Date.now() });
+              } else if (event.type === "watchdog_probe_result") {
+                advisory += `\n\n${probeOutcomeMessage(event.outcome)}`;
+                if (event.outcome.outcome === "failed" && !verificationHandled) {
+                  verificationHandled = true;
+                  failedProbe = event.outcome;
+                  const request = testCommands.request(event.outcome);
+                  let result: VerificationResult;
+                  if (!request) result = { status: "inconclusive", reason: "No recognizable failed test commands were recorded" };
+                  else if (++automaticVerifications > 2) result = { status: "inconclusive", reason: "Automatic verification limit reached for this stage" };
+                  else {
+                    try { result = await options.verifyTest!(request, signal); }
+                    catch (caught) { result = { status: "inconclusive", reason: caught instanceof Error ? caught.message : String(caught) }; }
+                  }
+                  await log.record({ type: "independent_verification", stageId: spec.id, request, result });
+                  advisory += `\n\n${verificationMessage(result)}`;
+                }
+              }
+            }
+            if (failure !== undefined) {
+              if (advisory) throw new Error(`${text}${advisory}`);
+              throw failure;
+            }
+            if (!advisory) return output!;
+            return { ...output!, content: [...output!.content, { type: "text", text: advisory }] };
+          },
+        } as ToolDefinition;
+      },
     });
     const active = session;
     await log.record({ type: "stage_session", id: spec.id, sessionFile: active.sessionManager.getSessionFile() ?? null });
@@ -319,10 +404,12 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
         };
         toolCalls.push(call);
         void log.record({ type: "tool_call", stageId: spec.id, call });
-        let probeRequested = false;
-        let probeCompleted = false;
-        let probePrepared = false;
-        if (context.watchdog && start) {
+        const watchdogCall = watchdogCalls.get(event.toolCallId);
+        watchdogCalls.delete(event.toolCallId);
+        let probeRequested = watchdogCall?.requested ?? false;
+        let probeCompleted = watchdogCall?.completed ?? false;
+        let probePrepared = watchdogCall?.prepared ?? false;
+        if (context.watchdog && start && !options.verifyTest) {
           const events = context.watchdog.observe({
             stageId: spec.id, stepId: call.stepId, toolCallId: call.toolCallId, tool: call.tool,
             args: start.args, isError: call.isError, output: resultText(event.result),

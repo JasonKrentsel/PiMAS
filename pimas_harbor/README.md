@@ -202,7 +202,8 @@ Agent environment variables, set with `--ae KEY=VALUE` or in the shell:
 | `PIMAS_SNAPSHOT_ROOT` | `/` | Directory tracked for per-stage file changes; `none` turns it off |
 | `PIMAS_RUN_SNAPSHOT` | `1` | `0` skips the whole-container manifests before and after the run |
 | `PIMAS_CONDITIONS` | none | Folder of per-task condition files, `<task>.json`, with replayed stage outputs and at most one fault. A task with no file fails the trial |
-| `PIMAS_WATCHDOG` | `false` | Set to `true` to enable the observation-only watchdog in all stages. The early-timeout threshold is configured in `PiMAS/src/timeout-watchdog.ts`; the default is 0.5. |
+| `PIMAS_WATCHDOG` | `false` | Set to `true` to enable the watchdog and on-demand independent verification after a failed probe. See [`verification/README.md`](verification/README.md). The early-timeout threshold is configured in `PiMAS/src/timeout-watchdog.ts`; the default is 0.5. |
+| `PIMAS_VERIFICATION_CONFIG` | none | Optional host JSON file specifying extra snapshot paths, exclusions and state export hooks; see the verifier README. |
 | `PIMAS_OFFLINE` | `0` | `1` disconnects the task container from its docker networks while the agent works, so it cannot fetch the upstream fix, and reconnects them for grading. A container that still reaches the internet fails the trial. Recorded as `network` in `run-info.json` |
 
 ## Tests
