@@ -217,6 +217,7 @@ Start the model server first (`../swe-bench-baseline/scripts/serve-vllm.sh`). Th
 K=2 ./run.sh control-rp            # writes jobs/phase1/control-rp
 K=2 ./run.sh tool-timeout
 K=1 ./run.sh tool-timeout verify   # always-verify: reviewer + one correction, jobs/phase1/tool-timeout+verify
+K=1 ./run.sh tool-timeout-all watchdog   # Phase 2 recovery (PiMAS/src/watchdog/), jobs/phase1/tool-timeout-all+watchdog
 python3 -I analyze.py results ../../jobs/phase1/*
 python3 -I verify_plan.py results   # which conditions get the always-verify comparison
 ```

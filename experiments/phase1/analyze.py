@@ -141,8 +141,10 @@ def slipped_lines(injections: list) -> list:
 
 
 def audit(spec: dict, injections: list, calls: list) -> list:
-    """Problems with how the fault reached the agent. Every run should have none."""
+    """Problems with how the fault reached the agent. Every run should have none. A result the watchdog repaired
+    (it appends a "[watchdog]" note) is meant to differ from the fault's, so it is not counted against the fault."""
     issues = []
+    calls = [c for c in calls if not repaired(c)]
     seen = {c["toolCallId"]: c for c in calls}
     target = spec.get("target") or {}
     for i in injections:
@@ -150,7 +152,7 @@ def audit(spec: dict, injections: list, calls: list) -> list:
             issues.append("injection changed nothing")
         call = seen.get(i["toolCallId"]) if i["toolCallId"] else None
         if call is None or call["tool"] == "edit":
-            continue  # handoff faults have no call; an edit's delivered text is its arguments, checked by corruption_kept
+            continue  # handoff faults, watchdog probes and repaired calls have none; an edit's delivered text is its arguments
         if call["output"].strip() != i["delivered"].strip():
             issues.append("agent saw something other than the injected output")
         shown = ANSI.sub("", i["delivered"]).replace("Command exited with code 1", "")
@@ -183,6 +185,11 @@ def audit(spec: dict, injections: list, calls: list) -> list:
     return sorted(set(issues))
 
 
+def repaired(call: dict) -> bool:
+    """A tool result the watchdog (PiMAS/src/watchdog/) replaced or annotated."""
+    return "\n[watchdog] " in (call.get("output") or "")
+
+
 def parse_time(value):
     return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
 
@@ -210,13 +217,19 @@ def run_row(trial: pathlib.Path, condition: str) -> dict:
     spec = (settings.get("condition") or {}).get("fault")
     artifacts = [e["artifact"] for e in events if e["type"] == "stage_end"]
     by_stage = {a["id"]: a for a in artifacts}
-    injections = [e["injection"] for e in events if e["type"] == "fault"]
+    # A watchdog probe that met the fault is recorded as an injection too; it is the watchdog's, not the agent's.
+    probe = lambda injection: str(injection.get("toolCallId") or "").startswith("watchdog-probe-")
+    injections = [e["injection"] for e in events if e["type"] == "fault" and not probe(e["injection"])]
     injection = injections[0] if injections else None
     cwd = (settings.get("workspaceCwd") or "/testbed").rstrip("/") + "/"
 
     row = {
         "condition": condition, "task": trial.name.rsplit("__", 1)[0], "trial": trial.name,
         "verify": bool(start.get("review")),
+        "watchdog": bool(settings.get("watchdog")),
+        "watchdog_probe_hits": sum(e["type"] == "fault" and probe(e["injection"]) for e in events),
+        **{f"watchdog_{phase}": sum(e["type"] == "watchdog" and e["phase"] == phase for e in events)
+           for phase in ("suspected", "confirmed", "repaired")},
         "reward": ((result.get("verifier_result") or {}).get("rewards") or {}).get("reward"),
         "exception": (result.get("exception_info") or {}).get("exception_type", ""),
         "pipeline_status": next((e["status"] for e in events if e["type"] == "run_end"), "cut-off"),
@@ -434,7 +447,7 @@ def summarize(rows: list, title: str = "Phase 1 results") -> str:
         first, flagged = runs[0], sum(bool(r["audit"]) for r in runs)
         runs = [r for r in runs if not r["audit"]]  # a flagged run is listed under Runs to check and left out of every rate
         used = [r for r in runs if r["used"]]
-        control = CONTROL.get(name)
+        control = CONTROL.get(name.removesuffix("+watchdog"))
         delta = paired_delta(runs, clean, control) if control else "–"
         restart = restart_estimate(runs, clean, control, rows) if control else "–"
         lines.append("| " + " | ".join(str(x) for x in [
@@ -507,7 +520,7 @@ def recovery(groups, clean, rows) -> list:
                 if r["resolved"] is not None:
                     by_task[r["task"]][i].append(r["resolved"])
         diffs = [statistics.mean(b) - statistics.mean(a) for a, b in by_task.values() if a and b]
-        control = CONTROL.get(name)
+        control = CONTROL.get(name.removesuffix("+watchdog"))
         restart = restart_numbers(plain, clean, control, rows) if control else None
         rejected = [r["corrections"] > 0 or r["approved"] is False for r in checked if r["approved"] is not None or r["corrections"]]
         out.append("| " + " | ".join(str(x) for x in [

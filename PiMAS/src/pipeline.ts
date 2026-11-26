@@ -18,7 +18,11 @@ import {
   type WorkspacePatch,
 } from "./provenance.js";
 import { collectUsage } from "./runtime.js";
-import { shellQuote, type Workspace } from "./workspace.js";
+import { shellQuote, type ExecResult, type Workspace } from "./workspace.js";
+import { createWatchdog, type Watchdog } from "./watchdog/monitor.js";
+import { defaultPlugins } from "./watchdog/plugins.js";
+import { outsideAgentTools } from "./watchdog/rerun.js";
+import type { WatchdogPlugin, WatchdogSummary } from "./watchdog/types.js";
 
 /**
  * Fixed-topology alternative to TaskRun: host code, not an orchestrator model, decides
@@ -44,6 +48,11 @@ export interface PipelineOptions {
   snapshotRoot?: string | null;
   /** Replayed clean outputs and at most one controlled fault (pipeline mode only). */
   condition?: Condition;
+  /**
+   * Detect and repair faults while the agent works (src/watchdog/README.md). `true` uses every plug-in and reruns
+   * commands through the workspace's own command path; an object picks the plug-ins or the rerun environment.
+   */
+  watchdog?: boolean | { plugins?: WatchdogPlugin[]; rerun?: (command: string, timeoutSeconds: number) => Promise<ExecResult> };
   signal?: AbortSignal;
 }
 
@@ -64,6 +73,8 @@ export interface PipelineResult {
   provenanceFile: string;
   /** The run's fault, where it first fired, and how often; null injection means its target never occurred. */
   fault: { spec: FaultSpec; injection: FaultInjection | null; injections: number } | null;
+  /** What the watchdog found and repaired, when it was on. */
+  watchdog?: WatchdogSummary;
 }
 
 export const PIPELINE_COMMAND_LIMITS: CommandLimits = { defaultSeconds: 600, maxSeconds: 3600 };
@@ -98,7 +109,15 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     void log.record({ type: "fault", injection: record });
   };
   const toolFaults = faultTools(fault, injected, (options.commandLimits ?? PIPELINE_COMMAND_LIMITS).defaultSeconds, options.workspace);
-  const context: StageContext = { options, log, artifacts, tracker, fault, injected, toolFaults };
+  const watchdogOptions = options.watchdog === true ? {} : options.watchdog || null;
+  const watchdog = watchdogOptions && createWatchdog({
+    workspace: options.workspace,
+    plugins: watchdogOptions.plugins ?? defaultPlugins(),
+    rerun: watchdogOptions.rerun ?? outsideAgentTools(options.workspace),
+    defaultTimeoutSeconds: (options.commandLimits ?? PIPELINE_COMMAND_LIMITS).defaultSeconds,
+    record: (event) => log.record({ type: "watchdog", ...event }),
+  });
+  const context: StageContext = { options, log, artifacts, tracker, fault, injected, toolFaults, watchdog };
   // Everything that shapes agent behavior, so a later reader can tell runs apart.
   const settings = {
     workspaceCwd: options.workspace.cwd,
@@ -107,6 +126,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     toolCallBudgets: { ...DEFAULT_BUDGETS, ...options.toolCallBudgets },
     submitAllowance: SUBMIT_ALLOWANCE,
     snapshotRoot,
+    watchdog: watchdog ? watchdog.summary.plugins : null,
     roles: options.roles,
     condition: condition
       ? { source: condition.source, replayed: Object.keys(condition.replay), fault, sha256: contentDigest(condition) }
@@ -193,6 +213,18 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     status, approved, artifacts, durationMs, provenanceFile: log.file,
     usage: sumUsage(artifacts.map((artifact) => artifact.usage)),
     fault: fault ? { spec: fault, injection: injections[0] ?? null, injections: injections.length } : null,
+    ...(watchdog ? { watchdog: watchdog.summary } : {}),
+  };
+}
+
+/** The agent's tools for one stage: the fault (if any) innermost, the watchdog (if on) outside it, seeing what the agent sees. */
+function wrapTools(context: StageContext, spec: { stage: StageName; id: string }, currentStep: () => string | null) {
+  const fault = context.toolFaults(spec.stage, spec.id, currentStep);
+  const watchdog = context.watchdog?.forStage(spec.id, currentStep);
+  if (!fault && !watchdog) return undefined;
+  return (tool: ToolDefinition) => {
+    const faulted = fault ? fault(tool) : tool;
+    return watchdog ? watchdog(faulted) : faulted;
   };
 }
 
@@ -204,6 +236,7 @@ interface StageContext {
   fault: FaultSpec | null;
   injected: (record: FaultInjection) => void;
   toolFaults: ToolFaults;
+  watchdog: Watchdog | null;
 }
 
 interface StageSpec<T> {
@@ -283,7 +316,7 @@ async function runStage<T>(context: StageContext, spec: StageSpec<T>): Promise<S
       toolset: spec.toolset,
       workspace: options.workspace,
       commandLimits: options.commandLimits ?? PIPELINE_COMMAND_LIMITS,
-      wrapTool: context.toolFaults(spec.stage, spec.id, () => currentStep),
+      wrapTool: wrapTools(context, spec, () => currentStep),
     });
     const active = session;
     await log.record({ type: "stage_session", id: spec.id, sessionFile: active.sessionManager.getSessionFile() ?? null });

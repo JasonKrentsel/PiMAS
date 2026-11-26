@@ -47,10 +47,12 @@ the time comparison. Ways to address it are listed under "Open decisions".
 | Step | What | GPU | Status |
 |---|---|---|---|
 | 1 | **The best case, offline.** Assume perfect detection: the fault's record says which result was faulty and when. Estimate what each recovery policy would cost and win, from the saved runs. | No | Done: `score.py`, `results/recovery-bounds.md` |
-| 2 | **Realistic detectors, offline.** Replace perfect detection with checks a real system could run (see candidates below). Measure, on the saved runs, how early each catches each fault and how often it fires on clean runs (control runs), then rescore the policies with that detection time. | No | Open |
-| 3 | **Live runs.** Implement the most promising policy in the pipeline and run it under the faults, to check that the redone work really fixes the task and costs what step 1 estimated. Needs per-step file snapshots (see "What needs the GPU"). | Yes | Open |
+| 2 | **Realistic detectors, offline.** Replace perfect detection with checks a real system could run (see candidates below). Measure, on the saved runs, how early each catches each fault and how often it fires on clean runs (control runs), then rescore the policies with that detection time. | No | In progress: the watchdog (`PiMAS/src/watchdog/`) with two plug-ins, tested offline; `replay-watchdog.mts`, `results/watchdog-replay.md` |
+| 3 | **Live runs.** Run the watchdog under the faults and on the controls (`run.sh <condition> watchdog`), to check that its repairs really save the time step 1 estimated and that it stays quiet on clean runs. | Yes | Open |
 
-Step 2 is where most of the work is. Step 1 shows why: detection time matters more than the repair.
+Step 2 is where most of the work is. Step 1 shows why: detection time matters more than the repair. The two
+plug-ins built so far repair in place (a real test result, a restored file), so they need no steps redone; the
+per-step snapshots under "What needs the GPU" matter only for faults whose repair means redoing work.
 
 ### Open decisions
 
@@ -138,6 +140,68 @@ succeeds at the control's rate, which only live runs (step 3) can confirm. A wro
 result fetched again and a slipped edit restored at no cost. Research is priced from `control-full`, a plan from
 `control-r`. Steps are priced by id only under `control-rp`, where the plan is replayed; elsewhere each step counts
 as an equal share of the control's executor time. Recovery after a timeout is allowed past the 100-minute limit.
+
+## Step 2: the watchdog
+
+The watchdog (`PiMAS/src/watchdog/`, documented in its README) wraps the agent's tools and runs plug-ins, each of
+which detects a kind of fault, confirms it with independent evidence, and repairs it. Two plug-ins cover the
+faults worth targeting:
+
+- **`test-runner`** (broken tools: `tool-timeout*`, `tool-false-fail*`, `tool-false-pass-all`). On the first test
+  result after each edit, it runs a probe through the agent's own bash tool: a test that must pass after a failure
+  or timeout, or one that must fail after a pass. If the probe's answer is wrong, the runner is broken: the agent's
+  command is rerun outside its tools (through the pipeline's own command path), the agent gets the real result,
+  and later test commands are rerouted the same way.
+- **`edit-check`** (corrupted edits: `edit-corrupt*`, including the hidden slip). After each edit, it reads the file
+  directly (not through the agent's tools) and, if it does not hold what the agent wrote, restores the intended
+  content and tells the agent.
+
+**Offline tests.** `PiMAS/tests/watchdog.test.ts` tests the plug-ins and the loop without a model.
+`PiMAS/tests/pipeline.test.ts` runs the whole pipeline with a scripted agent under four faults, loaded from their
+condition files, and with no fault. Under each fault the agent gets the real test result or a restored file;
+without one, it sees exactly what it would without the watchdog.
+
+**Replay on the saved runs** (`replay-watchdog.mts`, `results/watchdog-replay.md`). Each saved run's tool calls go
+through the `test-runner` detector. Probe answers are simulated: true for a healthy runner, faulted when a
+test-results fault would be active at that moment. Replay stops at the first catch, since from there the agent
+would see something different.
+
+| Condition | Runs | Caught | Probes per run | Minutes from fault to catch | Run minutes after the catch |
+|---|---|---|---|---|---|
+| `tool-timeout-all` | 18 | 18/18 | 1.4 | 0.0 | 93.2 |
+| `tool-false-fail-all` | 18 | 16/18 | 2.1 | 0.0 | 71.9 |
+| `tool-false-pass-all` | 10 | 10/10 | 1.5 | −0.2 | 28.3 |
+| Controls (`control-rp`, `-r`, `-full`) | 57 | 0/57 | 2.1–3.3 | – | – |
+| Every other fault | 227 | 1/227 | 1.7–2.5 | – | – |
+
+Medians; *Caught* and the times count runs where the fault fired. A negative time means the probe caught the fault
+before it touched any of the agent's own test results.
+
+- **It catches the persistent test faults at the first faulty result**, in 44 of 46 runs. The two misses ran their
+  tests in a way the detector does not recognize (for example output sent to a log file).
+- **It never fires on a clean run.** Controls and the other faults cost about 2 probes per run, a few seconds.
+  The one catch among the other faults is `tool-false-fail`: the probe itself met the single false failure.
+- **What is left for the live runs (step 3):** whether the agent, given the real results, finishes in about the
+  control's time. The "after the catch" column is the most that could be saved: up to 93 minutes per run under
+  `tool-timeout-all`.
+- **An earlier trigger was much worse.** Waiting for 3 bad test runs in a row with an edit in between, or for a
+  failing test to start passing, caught `tool-false-fail-all` in 10 of 18 runs, 24 minutes after the fault, and
+  `tool-false-pass-all` in none. Agents rerun tests without editing, and often reproduce a bug with a script, not a
+  test.
+
+`edit-check` is not replayed: the saved runs do not keep file contents. Its end-to-end test covers the hidden slip;
+on a clean run it can only misfire if a file ends up different from what the agent wrote.
+
+**What came from the `fault_recovery` branch (Sean).** The shared test-output recognition (`src/test-results.ts`),
+the known-passing probe command, and the plan of a probe followed by a fresh environment. Left out:
+- The early-timeout detector: it relies on our simulated timeouts returning at once, which real ones do not.
+- Asking the agent to run the probes: the watchdog runs them itself.
+- The cumulative count of any tool errors as the trigger.
+
+His Harbor verifier, which starts a fresh container from the task image, is the way to rerun commands outside a
+broken *environment* rather than only outside broken tools (`rerun` in `runPipeline`'s `watchdog` option).
+It has not been run against Docker yet. His branch also commits the whole `node_modules` folder (15,020 files) and
+a `.DS_Store`, so it should not be merged as it is.
 
 ## Faults that beat the agents' own checks
 

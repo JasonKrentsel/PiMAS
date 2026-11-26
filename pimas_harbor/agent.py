@@ -14,6 +14,8 @@ environment:
     PIMAS_AGENTS           role profiles  (default: config/pipeline/agents.json)
     PIMAS_MODE             pipeline | single (default: pipeline)
     PIMAS_REVIEW           1 to add the reviewer stage (default: 0)
+    PIMAS_WATCHDOG         1 to detect and repair faults while the agent works (default: 0;
+                           see PiMAS/src/watchdog/README.md)
     PIMAS_MAX_CORRECTIONS  executor corrections after a rejection (default: 1)
     PIMAS_NODE             node executable (default: node)
     PIMAS_SNAPSHOT_ROOT    directory tracked for per-stage file changes (default: /; "none" disables)
@@ -74,6 +76,7 @@ class PimasAgent(BaseAgent):
         return {
             "mode": self._setting("PIMAS_MODE", "pipeline"),
             "review": self._setting("PIMAS_REVIEW", "0"),
+            "watchdog": self._setting("PIMAS_WATCHDOG", "0"),
             "max_corrections": self._setting("PIMAS_MAX_CORRECTIONS", "1"),
             "snapshot_root": self._setting("PIMAS_SNAPSHOT_ROOT", "/"),
             "run_snapshot": self._setting("PIMAS_RUN_SNAPSHOT", "1"),
@@ -115,6 +118,8 @@ class PimasAgent(BaseAgent):
         ]
         if settings["review"] not in ("0", "false", "False"):
             command.append("--review")
+        if settings["watchdog"] not in ("0", "false", "False"):
+            command.append("--watchdog")
         condition = self._condition_file()
         if condition:
             command += ["--condition", str(condition)]

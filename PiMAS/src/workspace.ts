@@ -101,33 +101,41 @@ export function workspaceBashOperations(workspace: Workspace): BashOperations {
 }
 
 /** Pi's native tool definitions backed by workspace commands instead of the host filesystem. */
+async function runChecked(workspace: Workspace, command: string): Promise<string> {
+  const result = await workspace.exec(command, { timeoutSeconds: FILE_COMMAND_TIMEOUT_SECONDS });
+  if (result.exitCode !== 0) throw new Error((result.stderr || result.stdout).trim() || `Command failed with exit code ${result.exitCode}`);
+  return result.stdout;
+}
+
+/** A file's exact bytes, read with workspace commands (no agent tool in between). */
+export async function readWorkspaceFile(workspace: Workspace, file: string): Promise<Buffer> {
+  const size = Number((await runChecked(workspace, `wc -c < ${shellQuote(file)}`)).trim());
+  if (size > MAX_READ_BYTES) throw new Error(`${file} is ${size} bytes; inspect it with bash (head, sed, grep) instead`);
+  return Buffer.from((await runChecked(workspace, `base64 < ${shellQuote(file)} | tr -d '\\n'`)).trim(), "base64");
+}
+
+/** Write a file with workspace commands, in chunks that fit one command line. */
+export async function writeWorkspaceFile(workspace: Workspace, file: string, content: string): Promise<void> {
+  const bytes = Buffer.from(content, "utf8");
+  const temporary = `${file}.pimas-${process.pid}-${Date.now()}`;
+  for (let offset = 0; offset === 0 || offset < bytes.length; offset += WRITE_CHUNK_BYTES) {
+    const chunk = bytes.subarray(offset, offset + WRITE_CHUNK_BYTES).toString("base64");
+    await runChecked(workspace, `printf %s ${shellQuote(chunk)} | base64 -d ${offset === 0 ? ">" : ">>"} ${shellQuote(temporary)}`);
+  }
+  // Copy into place so an existing file keeps its owner and mode.
+  await runChecked(workspace, `cat ${shellQuote(temporary)} > ${shellQuote(file)} && rm -f ${shellQuote(temporary)}`);
+}
+
 export function createWorkspaceTools(
   workspace: Workspace,
   names: readonly WorkspaceToolName[],
   limits: CommandLimits = { defaultSeconds: DEFAULT_COMMAND_TIMEOUT_SECONDS, maxSeconds: MAX_COMMAND_TIMEOUT_SECONDS },
 ): ToolDefinition[] {
-  const run = async (command: string) => {
-    const result = await workspace.exec(command, { timeoutSeconds: FILE_COMMAND_TIMEOUT_SECONDS });
-    if (result.exitCode !== 0) throw new Error((result.stderr || result.stdout).trim() || `Command failed with exit code ${result.exitCode}`);
-    return result.stdout;
-  };
+  const run = (command: string) => runChecked(workspace, command);
   const succeeds = async (command: string) =>
     (await workspace.exec(command, { timeoutSeconds: FILE_COMMAND_TIMEOUT_SECONDS })).exitCode === 0;
-  const readFile = async (file: string) => {
-    const size = Number((await run(`wc -c < ${shellQuote(file)}`)).trim());
-    if (size > MAX_READ_BYTES) throw new Error(`${file} is ${size} bytes; inspect it with bash (head, sed, grep) instead`);
-    return Buffer.from((await run(`base64 < ${shellQuote(file)} | tr -d '\\n'`)).trim(), "base64");
-  };
-  const writeFile = async (file: string, content: string) => {
-    const bytes = Buffer.from(content, "utf8");
-    const temporary = `${file}.pimas-${process.pid}-${Date.now()}`;
-    for (let offset = 0; offset === 0 || offset < bytes.length; offset += WRITE_CHUNK_BYTES) {
-      const chunk = bytes.subarray(offset, offset + WRITE_CHUNK_BYTES).toString("base64");
-      await run(`printf %s ${shellQuote(chunk)} | base64 -d ${offset === 0 ? ">" : ">>"} ${shellQuote(temporary)}`);
-    }
-    // Copy into place so an existing file keeps its owner and mode.
-    await run(`cat ${shellQuote(temporary)} > ${shellQuote(file)} && rm -f ${shellQuote(temporary)}`);
-  };
+  const readFile = (file: string) => readWorkspaceFile(workspace, file);
+  const writeFile = (file: string, content: string) => writeWorkspaceFile(workspace, file, content);
   const directories = new Map<string, Set<string>>();
 
   const definitions: Record<WorkspaceToolName, () => ToolDefinition> = {

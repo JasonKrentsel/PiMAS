@@ -1034,3 +1034,96 @@ test("conditions that could silently run clean or misfire are rejected", () => {
   const control: Condition = parseCondition({ ...base, fault: null });
   assert.equal(control.fault, null);
 });
+
+// --- The watchdog (src/watchdog/) under the real Phase 1 and Phase 2 faults, with a scripted executor. ---
+
+const ANSWER_TEST = "import unittest\n\nclass T(unittest.TestCase):\n    def test_answer(self):\n        self.assertEqual(open('answer.txt').read().strip(), '42')\n";
+const RUN_TEST = "python3 -m unittest -v test_answer";
+
+/** A fault exactly as the experiments ran it, from its condition file. */
+async function experimentFault(condition: string) {
+  const file = new URL(`../../experiments/phase1/conditions/${condition}/django__django-14608.json`, import.meta.url);
+  return JSON.parse(await readFile(file, "utf8")).fault;
+}
+
+/** Run the pipeline with the watchdog on, the given files in the workspace and an executor making the given calls. */
+async function runWatched(t: TestContext, fault: unknown, files: Record<string, string>, calls: { tool: string; args: Record<string, unknown> }[]) {
+  const app = await fixture(t, executorCalling(calls));
+  await writeFile(path.join(app.workspaceDir, "input.txt"), "41\n");
+  for (const [name, content] of Object.entries(files)) await writeFile(path.join(app.workspaceDir, name), content);
+  const result = await runPipeline({
+    directory: app.state, workspace: localWorkspace(app.workspaceDir), modelsFile: app.modelsFile, roles: app.roles,
+    snapshotRoot: app.workspaceDir, request: REQUEST, watchdog: true,
+    condition: parseCondition({ source: "baseline/trial-1", replay: { research: REPLAYED_RESEARCH, plan: REPLAYED_PLAN }, ...(fault ? { fault } : {}) }),
+  });
+  const events = (await readFile(result.provenanceFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  const outputs = (await readFile(path.join(app.state, "tool-calls.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  const tests = outputs.filter((entry) => entry.tool === "bash" && entry.args?.command === RUN_TEST);
+  const watchdog = events.filter((event) => event.type === "watchdog").map((event) => `${event.plugin}:${event.phase}`);
+  return { app, result, events, outputs, tests, watchdog };
+}
+
+/** The agent writes a correct answer, then keeps running the test and rewriting the answer between runs. */
+const KEEPS_TESTING = [
+  { tool: "write", args: { path: "answer.txt", content: "42\n" } },
+  { tool: "bash", args: { command: RUN_TEST } },
+  { tool: "write", args: { path: "answer.txt", content: "42\n" } },
+  { tool: "bash", args: { command: RUN_TEST } },
+  { tool: "write", args: { path: "answer.txt", content: "42\n" } },
+  { tool: "bash", args: { command: RUN_TEST } },
+  { tool: "bash", args: { command: RUN_TEST } },
+];
+
+for (const condition of ["tool-false-fail-all", "tool-timeout-all"]) {
+  test(`the watchdog catches ${condition} with a known-passing probe and gives the agent real test results`, TIMEOUT, async (t) => {
+    const { result, tests, watchdog } = await runWatched(t, await experimentFault(condition), { "test_answer.py": ANSWER_TEST }, KEEPS_TESTING);
+    // The first test run after the edit is checked: the known-passing probe fails too, so the runner is broken.
+    assert.match(tests[0].output, /^Ran 1 test in [\d.]+s\n\nOK/m);
+    assert.match(tests[0].output, /bash tool is giving wrong test results \(a test that must pass came back (failed|timeout)\)/);
+    assert.equal(tests[0].isError, false);
+    // Every later test run is rerun outside the agent's tools.
+    assert.ok(tests.slice(1).every((entry) => /OK[\s\S]*Rerun outside your tools/.test(entry.output) && !entry.isError));
+    assert.deepEqual(watchdog, tests.flatMap(() => ["test-runner:suspected", "test-runner:confirmed", "test-runner:repaired"]));
+    assert.deepEqual(result.watchdog, { plugins: ["test-runner", "edit-check"], suspected: 4, confirmed: 4, repaired: 4 });
+  });
+}
+
+test("the watchdog catches tool-false-pass-all with a known-failing probe, so a wrong fix is not taken for a pass", TIMEOUT, async (t) => {
+  const { tests, watchdog } = await runWatched(t, await experimentFault("tool-false-pass-all"),
+    { "test_answer.py": ANSWER_TEST, "answer.txt": "41\n" }, [
+      { tool: "bash", args: { command: RUN_TEST } }, // fails for real, before any edit; the probe agrees
+      { tool: "write", args: { path: "answer.txt", content: "43\n" } }, // a wrong fix
+      { tool: "bash", args: { command: RUN_TEST } }, // the fault shows a pass; the known-failing probe "passes" too
+    ]);
+  assert.equal(tests[0].isError, true);
+  assert.match(tests[1].output, /FAILED \(failures=1\)[\s\S]*a test that must fail came back passed/);
+  assert.equal(tests[1].isError, true);
+  assert.deepEqual(watchdog, ["test-runner:suspected", "test-runner:dismissed", "test-runner:suspected", "test-runner:confirmed", "test-runner:repaired"]);
+});
+
+test("the watchdog restores an edit that edit-corrupt-hidden slipped, so the code runs as the agent wrote it", TIMEOUT, async (t) => {
+  const intended = "ok = len('abc') == 3";
+  const { app, outputs, watchdog } = await runWatched(t, await experimentFault("edit-corrupt-hidden"), { "check.py": "ok = False\nprint(ok)\n" }, [
+    { tool: "edit", args: { path: "check.py", edits: [{ oldText: "ok = False", newText: intended }] } },
+    { tool: "bash", args: { command: "python3 check.py" } },
+  ]);
+  const edit = outputs.find((entry) => entry.tool === "edit");
+  assert.match(edit.output, /line 1 reads "ok = len\('abc'\) [!<>=]+ 3" instead of "ok = len\('abc'\) == 3"[\s\S]*restored/);
+  assert.equal(outputs.find((entry) => entry.tool === "bash").output.trim(), "True");
+  assert.equal(await readFile(path.join(app.workspaceDir, "check.py"), "utf8"), `${intended}\nprint(ok)\n`);
+  assert.deepEqual(watchdog, ["edit-check:suspected", "edit-check:confirmed", "edit-check:repaired"]);
+});
+
+test("without a fault the watchdog only probes, and changes nothing the agent sees", TIMEOUT, async (t) => {
+  const { result, tests, outputs, watchdog } = await runWatched(t, null, { "test_answer.py": ANSWER_TEST, "answer.txt": "41\n" }, [
+    { tool: "bash", args: { command: RUN_TEST } },
+    { tool: "edit", args: { path: "answer.txt", edits: [{ oldText: "41", newText: "42" }] } },
+    { tool: "bash", args: { command: RUN_TEST } },
+  ]);
+  assert.equal(tests[0].isError, true);
+  assert.match(tests[1].output, /^OK$/m);
+  assert.ok(outputs.every((entry) => !/\[watchdog\]/.test(entry.output)));
+  // The first result before and after the edit is each checked with a probe, which a healthy runner answers correctly.
+  assert.deepEqual(watchdog, ["test-runner:suspected", "test-runner:dismissed", "test-runner:suspected", "test-runner:dismissed"]);
+  assert.deepEqual(result.watchdog, { plugins: ["test-runner", "edit-check"], suspected: 2, confirmed: 0, repaired: 0 });
+});

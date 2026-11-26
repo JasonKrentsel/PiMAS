@@ -56,7 +56,7 @@ class AgentRelayTest(unittest.TestCase):
             logs = root / "logs"
             logs.mkdir()
             agent = PimasAgent(logs_dir=logs, model_name="test/model", extra_env={
-                "PIMAS_NODE": str(bridge), "PIMAS_ROOT": tmp, "PIMAS_RUN_SNAPSHOT": "0", "PIMAS_REVIEW": "1",
+                "PIMAS_NODE": str(bridge), "PIMAS_ROOT": tmp, "PIMAS_RUN_SNAPSHOT": "0", "PIMAS_REVIEW": "1", "PIMAS_WATCHDOG": "1",
                 "PIMAS_MODELS": str(REPO / "config.example/pipeline/models.json"),
                 "PIMAS_AGENTS": str(REPO / "config.example/pipeline/agents.json"),
             })
@@ -86,6 +86,7 @@ class AgentRelayTest(unittest.TestCase):
             self.assertEqual(info["workspace_cwd"], str(workdir.resolve()))
             self.assertTrue(info["bridge_finished"])
             self.assertIn("--review", info["bridge_command"])
+            self.assertIn("--watchdog", info["bridge_command"])
             self.assertRegex(info["config"]["agents"]["sha256"], r"^[0-9a-f]{64}$")
             self.assertEqual(set(info["config"]["prompts"]), {"orchestrator", "researcher", "planner", "executor", "reviewer"})
             self.assertTrue((state / "config/prompts/researcher.md").read_text().startswith("You are the research agent"))

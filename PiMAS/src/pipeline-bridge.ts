@@ -59,6 +59,8 @@ async function main(send: Send): Promise<PipelineResult> {
   const { values } = parseArgs({ options: {
     models: { type: "string" }, agents: { type: "string" }, state: { type: "string" },
     mode: { type: "string", default: "pipeline" }, review: { type: "boolean", default: false },
+    // Detect and repair faults while the agent works; see src/watchdog/README.md.
+    watchdog: { type: "boolean", default: false },
     "max-corrections": { type: "string", default: "1" },
     // Directory tracked for per-stage file changes inside the workspace; "none" disables it.
     "snapshot-root": { type: "string", default: "/" },
@@ -135,6 +137,7 @@ async function main(send: Send): Promise<PipelineResult> {
       request: task!.prompt,
       mode: values.mode,
       review: values.review,
+      watchdog: values.watchdog,
       maxCorrections,
       snapshotRoot: values["snapshot-root"] === "none" ? null : values["snapshot-root"],
       ...(condition ? { condition } : {}),
