@@ -243,8 +243,11 @@ Runs where the fault fired: passes, then mean agent minutes per run, beside step
   suite with a one-hour timeout after the runner was shown broken. Rerouted commands then ran twice, through the
   agent's tool and again outside it, and this one ran for 87 minutes until the run hit its time limit; the code it
   left was graded correct. Rerouted test commands now run once, outside the agent's tools only (the plug-in's
-  `instead` hook), with the agent's timeout capped as its bash tool caps it. That change is tested offline
-  (`tests/watchdog.test.ts`, `tests/pipeline.test.ts`) and has not been rerun live.
+  `instead` hook), with the agent's timeout capped as its bash tool caps it. Rerun live, 3 times on django-15467
+  (`jobs/phase2-watchdog-fix/`, in the same archive): all 3 passed, in 6 to 15 minutes. In each, the fault reached
+  the agent once (its first test run after the edit) and the probe once, and every later test command (4 to 7 per run)
+  ran only outside the agent's tools. None of these agents ran the long Django suite, so the 87-minute case itself
+  did not recur; the offline tests check that a rerouted command never reaches the agent's tool.
 - *Caught* under `tool-false-pass-all` (18/19) is higher than *Injected* (10/19): the must-fail probe shows the
   runner is broken even in runs where no real test failed for the fault to hide.
 

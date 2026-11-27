@@ -68,7 +68,8 @@ Not covered yet: wrong knowledge (`fact-*`, `research-*`), the optional third pl
 ## Live results
 
 Run under the faults and on a control, 19 SWE-bench tasks each: every fault run passed except one
-`tool-false-fail-all` run, which ran a long test command twice (see Limits; since fixed), and no false alarms on the control. Full
+`tool-false-fail-all` run, which ran a long test command twice (see Limits; since fixed, and that task passed 3 of 3
+reruns), and no false alarms on the control. Full
 numbers: `experiments/phase2/README.md`, "Step 3".
 
 ## Tests

@@ -45,7 +45,7 @@ The result tables are in git, so they can be checked without rerunning anything:
 | `experiments/swe-bench-baseline/results/` | The clean baseline and pilot, one row per run. |
 
 **The saved runs** are in `data/`: `phase1-runs.tar.xz` (all 399 Phase 1 runs), `phase2-runs.tar.xz` (the 38
-Phase 2 fault runs, plus the superseded runs and the code they ran with; see `jobs/phase2/CODE.md`), `phase2-watchdog-runs.tar.xz` (the 95 live watchdog runs; see `jobs/phase2-watchdog/CODE.md`) and `swe-baseline-runs.tar.xz` (the 60 clean baseline runs). Each run has its grade, every conversation, tool call and stage diff, and the provenance
+Phase 2 fault runs, plus the superseded runs and the code they ran with; see `jobs/phase2/CODE.md`), `phase2-watchdog-runs.tar.xz` (the 95 live watchdog runs and 3 reruns of the fix; see `jobs/phase2-watchdog/CODE.md`) and `swe-baseline-runs.tar.xz` (the 60 clean baseline runs). Each run has its grade, every conversation, tool call and stage diff, and the provenance
 graph. Only the whole-filesystem manifests are left out, to keep them small. No GPU is needed to use them:
 
 ```bash
