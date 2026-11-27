@@ -1,6 +1,6 @@
 import { isTestCommand, reportsTimeout, showsFailure, testResults } from "../test-results.js";
 import { asToolOutput } from "./rerun.js";
-import type { Evidence, Suspicion, ToolCall, ToolOutcome, WatchdogPlugin, WatchdogTools } from "./types.js";
+import type { Evidence, Suspicion, ToolCall, ToolOutcome, WatchdogPlugin } from "./types.js";
 
 /**
  * Plug-in 1: a broken test runner (faults tool-timeout*, tool-false-fail*, tool-false-pass-all).
@@ -11,7 +11,8 @@ import type { Evidence, Suspicion, ToolCall, ToolOutcome, WatchdogPlugin, Watchd
  *          just saw. After a failure or timeout, a test that must pass; after a pass, a test that must fail. A wrong
  *          answer proves the runner, not the code, is at fault. A probe takes about a second.
  * repair   Rerun the agent's command outside its tools (rerun.ts) and give the agent that real result.
- *          Every later test command is rerouted the same way, since a broken runner stays broken.
+ * instead  Once the runner is shown broken, run every later test command outside the agent's tools only, so it
+ *          does not run twice (a broken runner stays broken; long test suites would double the agent's wait).
  *
  * An earlier version waited for 3 bad runs in a row with an edit in between, or for a failing test to start
  * passing. Replayed on the saved runs it caught tool-false-fail-all in only 10 of 18 runs, 24 minutes after the
@@ -36,19 +37,27 @@ export function testRunnerPlugin(): WatchdogPlugin {
   let broken = false; // confirmed: reroute every later test command
 
   const command = (call: ToolCall) => typeof call.args.command === "string" ? call.args.command : "";
-  const timeoutOf = (call: ToolCall, tools: WatchdogTools) =>
-    typeof call.args.timeout === "number" ? call.args.timeout : tools.defaultTimeoutSeconds;
+  const isTestRun = (call: ToolCall) => call.tool === "bash" && isTestCommand(command(call));
 
   return {
     name: "test-runner",
+
+    async instead(call, tools) {
+      if (!broken || !isTestRun(call)) return null;
+      const real = await tools.rerun(command(call), tools.timeoutFor(call.args.timeout));
+      return {
+        reason: "runner already shown broken",
+        note: "[watchdog] Run outside your tools (your bash tool was shown to give wrong test results).",
+        replacement: { output: asToolOutput(real), isError: real.exitCode !== 0 },
+      };
+    },
 
     detect(call, outcome) {
       if ((call.tool === "edit" || call.tool === "write") && !outcome.isError) {
         checked = false;
         return null;
       }
-      if (call.tool !== "bash" || !isTestCommand(command(call))) return null;
-      if (broken) return { reason: "rerouted: runner already shown broken" };
+      if (!isTestRun(call) || broken) return null;
       const now = classify(outcome);
       if (now === "unknown" || checked) return null;
       checked = true;
@@ -58,7 +67,6 @@ export function testRunnerPlugin(): WatchdogPlugin {
     },
 
     async confirm(suspicion: Suspicion, _call, tools): Promise<Evidence> {
-      if (broken) return { confirmed: true, reason: "runner already shown broken" };
       if (!tools.agentBash) return { confirmed: false, reason: "no bash tool to probe with" };
       const expect = (suspicion.data as { expect: TestOutcome }).expect;
       const probe = await tools.agentBash(expect === "passed" ? PASSING_PROBE : FAILING_PROBE, PROBE_TIMEOUT_SECONDS);
@@ -72,12 +80,11 @@ export function testRunnerPlugin(): WatchdogPlugin {
     },
 
     async repair(evidence, call, _outcome, tools) {
-      const fresh = await tools.rerun(command(call), timeoutOf(call, tools));
-      const first = evidence.reason !== "runner already shown broken";
-      const note = first
-        ? `[watchdog] Your bash tool is giving wrong test results (${evidence.reason}). The output above is your command's real result, rerun by the pipeline outside your tools. Your later test commands will be rerun the same way.`
-        : "[watchdog] Rerun outside your tools (your bash tool was shown to give wrong test results).";
-      return { note, replacement: { output: asToolOutput(fresh), isError: fresh.exitCode !== 0 } };
+      const real = await tools.rerun(command(call), tools.timeoutFor(call.args.timeout));
+      return {
+        note: `[watchdog] Your bash tool is giving wrong test results (${evidence.reason}). The output above is your command's real result, rerun by the pipeline outside your tools. Your later test commands will run outside your tools too.`,
+        replacement: { output: asToolOutput(real), isError: real.exitCode !== 0 },
+      };
     },
   };
 }

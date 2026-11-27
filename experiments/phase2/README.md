@@ -47,8 +47,8 @@ the time comparison. Ways to address it are listed under "Open decisions".
 | Step | What | GPU | Status |
 |---|---|---|---|
 | 1 | **The best case, offline.** Assume perfect detection: the fault's record says which result was faulty and when. Estimate what each recovery policy would cost and win, from the saved runs. | No | Done: `score.py`, `results/recovery-bounds.md` |
-| 2 | **Realistic detectors, offline.** Replace perfect detection with checks a real system could run (see candidates below). Measure, on the saved runs, how early each catches each fault and how often it fires on clean runs (control runs), then rescore the policies with that detection time. | No | In progress: the watchdog (`PiMAS/src/watchdog/`) with two plug-ins, tested offline; `replay-watchdog.mts`, `results/watchdog-replay.md` |
-| 3 | **Live runs.** Run the watchdog under the faults and on the controls (`run.sh <condition> watchdog`), to check that its repairs really save the time step 1 estimated and that it stays quiet on clean runs. | Yes | Open |
+| 2 | **Realistic detectors, offline.** Replace perfect detection with checks a real system could run (see candidates below). Measure, on the saved runs, how early each catches each fault and how often it fires on clean runs (control runs), then rescore the policies with that detection time. | No | Done for two plug-ins: the watchdog (`PiMAS/src/watchdog/`), tested offline; `replay-watchdog.mts`, `results/watchdog-replay.md`. Open: wrong knowledge (`fact-*`, `research-*`) |
+| 3 | **Live runs.** Run the watchdog under the faults and on the controls (`run.sh <condition> watchdog`), to check that its repairs really save the time step 1 estimated and that it stays quiet on clean runs. | Yes | Done for the two plug-ins (see "Step 3"): `results-watchdog/` |
 
 Step 2 is where most of the work is. Step 1 shows why: detection time matters more than the repair. The two
 plug-ins built so far repair in place (a real test result, a restored file), so they need no steps redone; the
@@ -181,7 +181,7 @@ before it touched any of the agent's own test results.
   tests in a way the detector does not recognize (for example output sent to a log file).
 - **It never fires on a clean run.** Controls and the other faults cost about 2 probes per run, a few seconds.
   The one catch among the other faults is `tool-false-fail`: the probe itself met the single false failure.
-- **What is left for the live runs (step 3):** whether the agent, given the real results, finishes in about the
+- **What was left for the live runs (step 3, below):** whether the agent, given the real results, finishes in about the
   control's time. The "after the catch" column is the most that could be saved: up to 93 minutes per run under
   `tool-timeout-all`.
 - **An earlier trigger was much worse.** Waiting for 3 bad test runs in a row with an edit in between, or for a
@@ -202,6 +202,56 @@ His Harbor verifier, which starts a fresh container from the task image, is the 
 broken *environment* rather than only outside broken tools (`rerun` in `runPipeline`'s `watchdog` option).
 It has not been run against Docker yet. His branch also commits the whole `node_modules` folder (15,020 files) and
 a `.DS_Store`, so it should not be merged as it is.
+
+## Step 3: the watchdog, live
+
+Each condition was run once per task (19 tasks) with the watchdog on (`run.sh <condition> watchdog`), on Qwen3.8-27B,
+8 at a time per GPU, and compared with the same conditions run without it. The tables are in `results-watchdog/`
+(same format as `results/`), the runs in `data/phase2-watchdog-runs.tar.xz`, and the code they ran with is described
+in `jobs/phase2-watchdog/CODE.md`. To rebuild the tables:
+
+```bash
+mkdir -p jobs && for f in phase1-runs phase2-runs phase2-watchdog-runs; do tar -C jobs -xJf data/$f.tar.xz; done
+cd experiments/phase1 && python3 -I analyze.py --title "Phase 2 watchdog results" ../phase2/results-watchdog \
+  ../../jobs/phase1/control-rp ../../jobs/phase1/tool-timeout-all ../../jobs/phase1/tool-false-fail-all \
+  ../../jobs/phase2/tool-false-pass-all ../../jobs/phase2/edit-corrupt-hidden ../../jobs/phase2-watchdog/*+watchdog
+```
+
+Runs where the fault fired: passes, then mean agent minutes per run, beside step 1's estimates
+(`results/recovery-bounds.md`). *Best case* is "caught at once, fix": perfect detection and a free repair.
+
+| Fault | Do nothing | Watchdog | Best case | Caught at once, restart |
+|---|---|---|---|---|
+| `tool-timeout-all` | 4/17, 92.5 | **18/18, 9.6** | 17/17, 7.8 | 17/17, 16.1 |
+| `tool-false-fail-all` | 6/18, 85.7 | **18/19, 15.4** (10.7 without the failed run) | 18/18, 7.6 | 18/18, 19.8 |
+| `tool-false-pass-all` | 8/9, 38.9 | **10/10, 13.1** | 9/9, 8.1 | 9/9, 15.2 |
+| `edit-corrupt-hidden` | 14/14, 27.8 | **15/15, 10.1** | 14/14, 7.0 | 14/14, 8.8 |
+| `control-rp` (no fault, all runs) | 19/19, 7.4 | **19/19, 7.4**, no false alarms | – | – |
+
+- **It wins back the tasks the persistent test faults cost,** 36 of 37 runs against 10 of 35 without it, and takes
+  the runs from the time limit to about the control's time. A run under `tool-timeout-all` has a median of
+  6.2 minutes, the same as the control.
+- **It gets within a few minutes of the best case,** and beats a restart on every fault but `edit-corrupt-hidden`,
+  where a restart is cheap because the agent loses only one edit.
+- **It catches each fault at its first faulty result**: one probe per run (*Checked* 1 in `results-watchdog/summary.md`),
+  and in every caught test-fault run the probe itself met the fault. `edit-check` restored every hidden slip, so no
+  view ever had to hide it (*Hits/run* 1, against 3.5 without the watchdog).
+- **It stays quiet on clean runs.** `control-rp` with the watchdog: 0 of 19 runs flagged, 2 probes per run, the same
+  pass rate and mean minutes. Its median minutes and tokens are slightly higher (7.4 against 6.2 minutes); the agent
+  sees exactly the same results as without the watchdog, so this is run-to-run variation.
+- **The one failure was the watchdog's own cost, now fixed.** Under `tool-false-fail-all`, django-15467 ran a Django
+  suite with a one-hour timeout after the runner was shown broken. Rerouted commands then ran twice, through the
+  agent's tool and again outside it, and this one ran for 87 minutes until the run hit its time limit; the code it
+  left was graded correct. Rerouted test commands now run once, outside the agent's tools only (the plug-in's
+  `instead` hook), with the agent's timeout capped as its bash tool caps it. That change is tested offline
+  (`tests/watchdog.test.ts`, `tests/pipeline.test.ts`) and has not been rerun live.
+- *Caught* under `tool-false-pass-all` (18/19) is higher than *Injected* (10/19): the must-fail probe shows the
+  runner is broken even in runs where no real test failed for the fault to hide.
+
+**Limits of these runs.** One run per task. The simulated timeout returns at once, so under a real hang the first
+faulty test run and its probe would each cost their full timeout before the watchdog acts. Reruns use the same
+workspace through the pipeline's own command path, which is enough for faults in the tool layer (all of this
+project's) but not for a broken environment.
 
 ## Faults that beat the agents' own checks
 

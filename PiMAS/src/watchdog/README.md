@@ -6,6 +6,8 @@ plug-ins check for a fault, confirm it with independent evidence, and repair it.
 ```
 agent ──call──► watchdog ──► fault wrapper (experiments only) ──► real tool
         ◄─result + note──┘
+                 │ before each call, for each plug-in:
+                 │   instead → a fault already confirmed? handle the call without the tool (optional)
                  │ after each call, for each plug-in:
                  │   detect  → suspicious?            (cheap, from the call and its result)
                  │   confirm → independent evidence   (a probe, a direct file read)
@@ -26,14 +28,15 @@ pipeline's own command path, which no agent tool or fault wraps.
 | Phase 1 runs | `K=1 ./run.sh tool-timeout-all watchdog` (writes `jobs/phase1/tool-timeout-all+watchdog`) |
 
 Each step is recorded in `provenance.jsonl` as `{"type": "watchdog", "plugin", "phase", "reason", ...}`, with
-`phase` one of `suspected`, `dismissed`, `confirmed` or `repaired`. The run summary gets
-`watchdog: { plugins, suspected, confirmed, repaired }`.
+`phase` one of `suspected`, `dismissed`, `confirmed`, `repaired` or `rerouted` (a call handled without the agent's
+tool). The run summary gets `watchdog: { plugins, suspected, confirmed, repaired }`, where `repaired` includes
+rerouted calls.
 
 ## The plug-ins
 
 | Plug-in | File | Faults | Detect | Confirm | Repair |
 |---|---|---|---|---|---|
-| `test-runner` | `test-runner.ts` | `tool-timeout*`, `tool-false-fail*`, `tool-false-pass-all` | The first test result after each edit, and the first of the run | A probe through the agent's own bash tool: a test that must pass (after a failure or timeout) or must fail (after a pass) | Rerun the agent's command outside its tools and give it the real result; reroute every later test command the same way |
+| `test-runner` | `test-runner.ts` | `tool-timeout*`, `tool-false-fail*`, `tool-false-pass-all` | The first test result after each edit, and the first of the run | A probe through the agent's own bash tool: a test that must pass (after a failure or timeout) or must fail (after a pass) | Rerun the agent's command outside its tools and give it the real result. From then on, run every test command outside its tools only (`instead`), so it runs once |
 | `edit-check` | `edit-check.ts` | `edit-corrupt`, `edit-corrupt-all`, `edit-corrupt-hidden` | After an edit or write, read the file directly; suspicious if it does not hold the text the agent wrote | The direct read; the intended content is the old file with the agent's edits applied exactly | Write the intended content, and tell the agent which line was wrong |
 
 Not covered yet: wrong knowledge (`fact-*`, `research-*`), the optional third plug-in. See
@@ -53,13 +56,20 @@ Not covered yet: wrong knowledge (`fact-*`, `research-*`), the optional third pl
 ## Adding a plug-in
 
 1. Write `src/watchdog/<name>.ts` exporting a function that returns a `WatchdogPlugin` (see `types.ts`). Keep its
-   state inside that function, so each run gets a fresh copy.
+   state inside that function, so each run gets a fresh copy. `before` and `instead` are optional; use `instead`
+   only for a fault already confirmed, since the agent's tool does not run.
 2. Add it to `defaultPlugins()` in `plugins.ts`.
 3. Add unit tests in `tests/watchdog.test.ts` (no model needed), and an end-to-end test in
    `tests/pipeline.test.ts` under the fault it targets (see the tests named "the watchdog ...", which load the
    faults exactly as the experiments ran them).
 4. Check its false alarms on the saved runs: extend `experiments/phase2/replay-watchdog.mts`, or write a replay
    for your detector the same way.
+
+## Live results
+
+Run under the faults and on a control, 19 SWE-bench tasks each: every fault run passed except one
+`tool-false-fail-all` run, which ran a long test command twice (see Limits; since fixed), and no false alarms on the control. Full
+numbers: `experiments/phase2/README.md`, "Step 3".
 
 ## Tests
 
@@ -86,7 +96,10 @@ watchdog.
   `ImportMismatchError`).
 - **Only bash test runs are checked.** A test run whose output goes to a log that the agent then reads is not
   recognized, so it is not checked. Test commands are recognized by name (`src/test-results.ts`).
-- **Rerouted commands run twice.** The agent's command still runs through its tool first, then again outside it.
+- **The test command that reveals the fault runs twice:** through the agent's tool, then again outside it. Later
+  test commands run once. (Before `instead`, every rerouted command ran twice; in one live run a Django suite with
+  a one-hour timeout ran for 87 minutes and the run hit the time limit.)
+- **Reruns get the agent's timeout,** capped as the bash tool caps it, and stop when the agent's call is aborted.
 - **Probes go through the fault wrapper,** so each probe that hits a fault is recorded as an injection. A
   single-shot fault (`tool-false-fail`, `tool-timeout`) can be used up by a probe instead of by the agent's test.
 - **Edit check reads each edited file twice** (before and after), by direct workspace commands.

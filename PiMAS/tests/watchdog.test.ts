@@ -24,14 +24,16 @@ const call = (tool: string, args: Record<string, unknown>): ToolCall =>
 const testRun = call.bind(null, "bash", { command: "python3 -m unittest -v t" });
 
 /** Tools for a plug-in, with a probe that answers as the given (possibly broken) runner would. */
-function fakeTools(runner: (command: string) => ToolOutcome, fresh = PASS): WatchdogTools & { probes: string[] } {
+function fakeTools(runner: (command: string) => ToolOutcome, fresh = PASS): WatchdogTools & { probes: string[]; reruns: number[] } {
   const probes: string[] = [];
+  const reruns: number[] = []; // the timeout of each rerun
   return {
     probes,
+    reruns,
     workspace: localWorkspace(tmpdir()),
     agentBash: async (command) => { probes.push(command); return runner(command); },
-    rerun: async () => ({ exitCode: 0, stdout: "", stderr: fresh }),
-    defaultTimeoutSeconds: 600,
+    rerun: async (_command, timeoutSeconds) => { reruns.push(timeoutSeconds); return { exitCode: 0, stdout: "", stderr: fresh }; },
+    timeoutFor: (requested) => Math.min(typeof requested === "number" ? requested : 600, 3600),
   };
 }
 const honest = (command: string) => command === FAILING_PROBE ? { output: FAIL, isError: true } : { output: PASS, isError: false };
@@ -60,7 +62,7 @@ test("test runner: the first test result after each edit is checked, with a prob
   assert.deepEqual(tools.probes, [PASSING_PROBE, FAILING_PROBE]);
 });
 
-test("test runner: a runner that fails a known-passing test is broken, and every later test run is rerouted", async () => {
+test("test runner: a runner that fails a known-passing test is broken, and every later test run goes around it", async () => {
   const plugin = testRunnerPlugin();
   const tools = fakeTools(() => ({ output: FAIL, isError: true })); // reports every test as failing
   const trigger = testRun();
@@ -70,11 +72,21 @@ test("test runner: a runner that fails a known-passing test is broken, and every
   const repair = await plugin.repair(evidence, trigger, { output: FAIL, isError: true }, tools);
   assert.deepEqual(repair.replacement, { output: PASS, isError: false });
   assert.match(repair.note, /bash tool is giving wrong test results/);
-  // From now on, no more probes: every test command is rerun outside the agent's tools.
-  const later = await plugin.detect(testRun(), { output: FAIL, isError: true }, tools);
-  assert.match(later?.reason ?? "", /^rerouted/);
-  assert.equal((await plugin.confirm(later!, testRun(), tools)).confirmed, true);
+  // From now on, no more probes: every test command runs outside the agent's tools only, with the tool's timeout.
+  assert.equal(await plugin.instead!(call("bash", { command: "ls" }), tools), null, "not a test run: the tool runs");
+  const later = await plugin.instead!(call("bash", { command: "python3 -m unittest -v t", timeout: 9000 }), tools);
+  assert.deepEqual(later?.replacement, { output: PASS, isError: false });
+  assert.equal(plugin.detect(testRun(), { output: FAIL, isError: true }, tools), null, "nothing left to detect");
+  assert.deepEqual(tools.reruns, [600, 3600], "the default timeout, then the cap");
   assert.equal(tools.probes.length, 1);
+});
+
+test("test runner: a healthy runner's test commands are never handled in its place", async () => {
+  const plugin = testRunnerPlugin();
+  const tools = fakeTools(honest);
+  const suspicion = await plugin.detect(testRun(), { output: FAIL, isError: true }, tools);
+  await plugin.confirm(suspicion!, testRun(), tools);
+  assert.equal(await plugin.instead!(testRun(), tools), null);
 });
 
 test("test runner: a runner that hides failures shows a known-failing probe as passing", async () => {
@@ -143,7 +155,7 @@ test("the watchdog loop appends repair notes and replacements to what the agent 
   const events: WatchdogEvent[] = [];
   const watchdog = createWatchdog({
     workspace: localWorkspace(tmpdir()),
-    defaultTimeoutSeconds: 600,
+    commandLimits: { defaultSeconds: 600, maxSeconds: 3600 },
     rerun: async () => ({ exitCode: 0, stdout: "real", stderr: "" }),
     record: (event) => { events.push(event); },
     plugins: [{
@@ -163,4 +175,33 @@ test("the watchdog loop appends repair notes and replacements to what the agent 
   assert.deepEqual([repaired.content, (repaired as { isError?: boolean }).isError], [[{ type: "text", text: "real\n\n[watchdog] fixed" }], false]);
   assert.deepEqual(events.map((event) => event.phase), ["suspected", "confirmed", "repaired"]);
   assert.deepEqual(watchdog.summary, { plugins: ["always"], suspected: 1, confirmed: 1, repaired: 1 });
+});
+
+test("the watchdog loop runs a call a plug-in handles instead without the agent's tool", async () => {
+  const events: WatchdogEvent[] = [];
+  let ran = 0;
+  const watchdog = createWatchdog({
+    workspace: localWorkspace(tmpdir()),
+    commandLimits: { defaultSeconds: 600, maxSeconds: 3600 },
+    rerun: async () => ({ exitCode: 0, stdout: "real", stderr: "" }),
+    record: (event) => { events.push(event); },
+    plugins: [{
+      name: "around",
+      instead: (c) => c.args.command === "test" ? { reason: "known broken", note: "[watchdog] ran outside", replacement: { output: "real", isError: false } } : null,
+      detect: () => null,
+      confirm: async () => ({ confirmed: false, reason: "" }),
+      repair: async () => ({ note: "" }),
+    }],
+  });
+  const bash = watchdog.forStage("execute", () => "S1")({
+    name: "bash", label: "bash", description: "", parameters: {},
+    execute: async () => { ran++; return { content: [{ type: "text", text: "fake" }], details: undefined, isError: true }; },
+  } as unknown as ToolDefinition);
+  const handled = await bash.execute("c1", { command: "test" }, undefined, undefined, undefined as never);
+  assert.deepEqual(handled.content, [{ type: "text", text: "real\n\n[watchdog] ran outside" }]);
+  assert.equal(ran, 0, "the agent's tool did not run");
+  await bash.execute("c2", { command: "ls" }, undefined, undefined, undefined as never);
+  assert.equal(ran, 1);
+  assert.deepEqual(events.map((event) => [event.phase, event.reason]), [["rerouted", "known broken"]]);
+  assert.equal(watchdog.summary.repaired, 1);
 });

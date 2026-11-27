@@ -1076,15 +1076,17 @@ const KEEPS_TESTING = [
 
 for (const condition of ["tool-false-fail-all", "tool-timeout-all"]) {
   test(`the watchdog catches ${condition} with a known-passing probe and gives the agent real test results`, TIMEOUT, async (t) => {
-    const { result, tests, watchdog } = await runWatched(t, await experimentFault(condition), { "test_answer.py": ANSWER_TEST }, KEEPS_TESTING);
+    const { result, events, tests, watchdog } = await runWatched(t, await experimentFault(condition), { "test_answer.py": ANSWER_TEST }, KEEPS_TESTING);
     // The first test run after the edit is checked: the known-passing probe fails too, so the runner is broken.
     assert.match(tests[0].output, /^Ran 1 test in [\d.]+s\n\nOK/m);
     assert.match(tests[0].output, /bash tool is giving wrong test results \(a test that must pass came back (failed|timeout)\)/);
     assert.equal(tests[0].isError, false);
-    // Every later test run is rerun outside the agent's tools.
-    assert.ok(tests.slice(1).every((entry) => /OK[\s\S]*Rerun outside your tools/.test(entry.output) && !entry.isError));
-    assert.deepEqual(watchdog, tests.flatMap(() => ["test-runner:suspected", "test-runner:confirmed", "test-runner:repaired"]));
-    assert.deepEqual(result.watchdog, { plugins: ["test-runner", "edit-check"], suspected: 4, confirmed: 4, repaired: 4 });
+    // Every later test run goes around the agent's tools: it runs once, outside them, so the fault never sees it.
+    assert.ok(tests.slice(1).every((entry) => /OK[\s\S]*Run outside your tools/.test(entry.output) && !entry.isError));
+    assert.deepEqual(watchdog, ["test-runner:suspected", "test-runner:confirmed", "test-runner:repaired", ...tests.slice(1).map(() => "test-runner:rerouted")]);
+    assert.deepEqual(result.watchdog, { plugins: ["test-runner", "edit-check"], suspected: 1, confirmed: 1, repaired: 4 });
+    const faulted = events.filter((event) => event.type === "fault").map((event) => String(event.injection.toolCallId));
+    assert.equal(faulted.filter((id) => !id.startsWith("watchdog-probe-")).length, 1, "only the agent's first test run met the fault");
   });
 }
 

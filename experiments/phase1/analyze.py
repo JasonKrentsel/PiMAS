@@ -228,8 +228,11 @@ def run_row(trial: pathlib.Path, condition: str) -> dict:
         "verify": bool(start.get("review")),
         "watchdog": bool(settings.get("watchdog")),
         "watchdog_probe_hits": sum(e["type"] == "fault" and probe(e["injection"]) for e in events),
-        **{f"watchdog_{phase}": sum(e["type"] == "watchdog" and e["phase"] == phase for e in events)
-           for phase in ("suspected", "confirmed", "repaired")},
+        # A rerouted test run (a runner already shown broken) is a repair, not a check. Runs before the watchdog had
+        # its "rerouted" phase logged each one as suspected, confirmed and repaired, with a "rerouted:" suspicion.
+        "watchdog_suspected": sum(e["type"] == "watchdog" and e["phase"] == "suspected" and not e["reason"].startswith("rerouted:") for e in events),
+        "watchdog_confirmed": sum(e["type"] == "watchdog" and e["phase"] == "confirmed" and e["reason"] != "runner already shown broken" for e in events),
+        "watchdog_repaired": sum(e["type"] == "watchdog" and e["phase"] in ("repaired", "rerouted") for e in events),
         "reward": ((result.get("verifier_result") or {}).get("rewards") or {}).get("reward"),
         "exception": (result.get("exception_info") or {}).get("exception_type", ""),
         "pipeline_status": next((e["status"] for e in events if e["type"] == "run_end"), "cut-off"),
@@ -473,6 +476,7 @@ def summarize(rows: list, title: str = "Phase 1 results") -> str:
         lines += [f'| {r["condition"]} | {r["trial"]} | {r["exception"] or "–"} | {r["injected"]} | {r["audit"] or "–"} | {r["extensions"] or "–"} | '
                   f'{r["network_restore_errors"] or ("offline" if r["offline"] else "online")} | {r["upstream_calls"]} |' for r in problems]
     lines += recovery({key: [r for r in runs if not r["audit"]] for key, runs in groups.items()}, clean, rows)
+    lines += watchdog_table(rows)
     online = sum(not r["offline"] for r in rows)
     if online:
         lines += ["", f"{online}/{len(rows)} runs had internet access (no PIMAS_OFFLINE); results that depend on it are not comparable."]
@@ -532,6 +536,26 @@ def recovery(groups, clean, rows) -> list:
             median([r["out_tokens"] for r in plain]), median([r["out_tokens"] for r in checked]),
             rate(rejected), sum(r["corrections"] for r in checked), median([r["verify_min"] for r in checked]),
         ]) + " |")
+    return out
+
+
+def watchdog_table(rows: list) -> list:
+    """Per condition run with the watchdog (PiMAS/src/watchdog/): how often it checked, caught and repaired."""
+    runs = defaultdict(list)
+    for r in rows:
+        if r["watchdog"] and not r["audit"]:
+            runs[r["condition"]].append(r)
+    if not runs:
+        return []
+    out = ["", "## Watchdog", "",
+           "*Checked* is the median number of watchdog suspicions per run (each test-runner check is one probe; rerouted runs are not checks). "
+           "*Caught* counts runs where a plug-in confirmed a fault; on a control every catch is a false alarm. "
+           "*Repairs* is the median number of repaired or rerouted results in those runs. *Probe hits* counts runs where a probe met the fault.", "",
+           "| Condition | Runs | Checked | Caught | Repairs | Probe hits |", "|---|---|---|---|---|---|"]
+    for name, group in sorted(runs.items()):
+        caught = [r for r in group if r["watchdog_confirmed"]]
+        out.append(f"| {name} | {len(group)} | {median([r['watchdog_suspected'] for r in group])} | {len(caught)}/{len(group)} | "
+                   f"{median([r['watchdog_repaired'] for r in caught]) if caught else '–'} | {sum(r['watchdog_probe_hits'] > 0 for r in group)} |")
     return out
 
 

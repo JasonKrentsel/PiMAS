@@ -15,11 +15,12 @@ import { shellQuote, type ExecResult, type Workspace } from "../workspace.js";
  * workspaces that do not import themselves from their own path.
  */
 export function outsideAgentTools(workspace: Workspace) {
-  return (command: string, timeoutSeconds: number): Promise<ExecResult> => workspace.exec(command, { timeoutSeconds });
+  return (command: string, timeoutSeconds: number, signal?: AbortSignal): Promise<ExecResult> =>
+    workspace.exec(command, { timeoutSeconds, ...(signal ? { signal } : {}) });
 }
 
 export function freshCopy(workspace: Workspace) {
-  return async (command: string, timeoutSeconds: number): Promise<ExecResult> => {
+  return async (command: string, timeoutSeconds: number, signal?: AbortSignal): Promise<ExecResult> => {
     const cwd = workspace.cwd.replace(/\/+$/, "");
     const inCopy = command.split(cwd).join('"$PIMAS_FRESH"');
     const script = [
@@ -29,7 +30,7 @@ export function freshCopy(workspace: Workspace) {
       `cd / && rm -rf "$PIMAS_FRESH"`,
       `exit $status`,
     ].join("\n");
-    return workspace.exec(script, { timeoutSeconds });
+    return workspace.exec(script, { timeoutSeconds, ...(signal ? { signal } : {}) });
   };
 }
 

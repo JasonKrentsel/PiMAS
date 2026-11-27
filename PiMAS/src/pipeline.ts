@@ -52,7 +52,7 @@ export interface PipelineOptions {
    * Detect and repair faults while the agent works (src/watchdog/README.md). `true` uses every plug-in and reruns
    * commands through the workspace's own command path; an object picks the plug-ins or the rerun environment.
    */
-  watchdog?: boolean | { plugins?: WatchdogPlugin[]; rerun?: (command: string, timeoutSeconds: number) => Promise<ExecResult> };
+  watchdog?: boolean | { plugins?: WatchdogPlugin[]; rerun?: (command: string, timeoutSeconds: number, signal?: AbortSignal) => Promise<ExecResult> };
   signal?: AbortSignal;
 }
 
@@ -114,7 +114,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     workspace: options.workspace,
     plugins: watchdogOptions.plugins ?? defaultPlugins(),
     rerun: watchdogOptions.rerun ?? outsideAgentTools(options.workspace),
-    defaultTimeoutSeconds: (options.commandLimits ?? PIPELINE_COMMAND_LIMITS).defaultSeconds,
+    commandLimits: options.commandLimits ?? PIPELINE_COMMAND_LIMITS,
     record: (event) => log.record({ type: "watchdog", ...event }),
   });
   const context: StageContext = { options, log, artifacts, tracker, fault, injected, toolFaults, watchdog };

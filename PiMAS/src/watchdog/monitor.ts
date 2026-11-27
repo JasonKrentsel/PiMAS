@@ -1,21 +1,23 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { CommandLimits } from "../execution-tools.js";
 import type { ExecResult, Workspace } from "../workspace.js";
 import type { ToolCall, ToolOutcome, WatchdogEvent, WatchdogPlugin, WatchdogSummary, WatchdogTools } from "./types.js";
 
 export interface WatchdogOptions {
   workspace: Workspace;
   plugins: WatchdogPlugin[];
-  rerun: (command: string, timeoutSeconds: number) => Promise<ExecResult>;
-  defaultTimeoutSeconds: number;
+  rerun: (command: string, timeoutSeconds: number, signal?: AbortSignal) => Promise<ExecResult>;
+  /** The agent's bash timeouts (default and cap), so a rerun gets the timeout the agent's command would. */
+  commandLimits: CommandLimits;
   record: (event: WatchdogEvent) => void | Promise<void>;
 }
 
 export type Watchdog = ReturnType<typeof createWatchdog>;
 
 /**
- * The watchdog loop. It wraps every agent tool (outside any fault wrapper, so it sees what the agent sees) and,
- * after each call, gives every plug-in the chance to detect, confirm and repair. Notes from repairs are appended to
- * the result the agent gets.
+ * The watchdog loop. It wraps every agent tool (outside any fault wrapper, so it sees what the agent sees). Before a
+ * call, a plug-in may handle it in place of the tool (`instead`); after it, every plug-in gets the chance to detect,
+ * confirm and repair. Notes from repairs are appended to the result the agent gets.
  */
 export function createWatchdog(options: WatchdogOptions) {
   const summary: WatchdogSummary = { plugins: options.plugins.map((plugin) => plugin.name), suspected: 0, confirmed: 0, repaired: 0 };
@@ -47,10 +49,20 @@ export function createWatchdog(options: WatchdogOptions) {
           const tools: WatchdogTools = {
             workspace: options.workspace,
             agentBash: bash ? agentBash : null,
-            rerun: options.rerun,
-            defaultTimeoutSeconds: options.defaultTimeoutSeconds,
+            rerun: (command, timeoutSeconds) => options.rerun(command, timeoutSeconds, signal),
+            timeoutFor: (requested) => Math.min(
+              typeof requested === "number" ? requested : options.commandLimits.defaultSeconds, options.commandLimits.maxSeconds),
           };
           for (const plugin of options.plugins) await plugin.before?.(call, tools);
+
+          // A plug-in that already knows the tool is broken may handle the call itself; the tool does not run.
+          for (const plugin of options.plugins) {
+            const handled = await plugin.instead?.(call, tools);
+            if (!handled) continue;
+            summary.repaired++;
+            await options.record({ stageId, toolCallId, plugin: plugin.name, phase: "rerouted", reason: handled.reason });
+            return toolResult(handled.replacement, [handled.note]);
+          }
 
           let result: Awaited<ReturnType<ToolDefinition["execute"]>> | undefined;
           let thrown: unknown;
@@ -87,17 +99,22 @@ export function createWatchdog(options: WatchdogOptions) {
             if (thrown !== undefined) throw thrown;
             return result!;
           }
-          return {
-            content: [{ type: "text" as const, text: `${outcome.output}\n\n${notes.join("\n\n")}` }],
-            details: undefined,
-            isError: outcome.isError,
-          } as Awaited<ReturnType<ToolDefinition["execute"]>>;
+          return toolResult(outcome, notes);
         },
       } as ToolDefinition;
     };
   }
 
   return { forStage, summary };
+}
+
+/** A tool result holding an outcome with the watchdog's notes after it. */
+function toolResult(outcome: ToolOutcome, notes: string[]) {
+  return {
+    content: [{ type: "text" as const, text: `${outcome.output}\n\n${notes.join("\n\n")}` }],
+    details: undefined,
+    isError: outcome.isError,
+  } as Awaited<ReturnType<ToolDefinition["execute"]>>;
 }
 
 export function resultText(result: unknown): string {

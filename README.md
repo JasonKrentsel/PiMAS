@@ -6,7 +6,8 @@ spreads, what it costs, and how well full restart and always-verify recover. Pha
 19 tasks) is done. Phase 2 added two faults built to get past the agents' own checks (38 runs, done) and is building
 dependency-aware recovery. Its first step, the best case with perfect detection estimated from the saved runs, is
 done. Step 2, the watchdog (`PiMAS/src/watchdog/`), detects and repairs broken test runners and corrupted edits while
-the agent works; it is tested offline and replayed on the saved runs. The plan and the decisions still open are in
+the agent works. Step 3 ran it live (95 runs): with it, 36 of 37 runs under the persistent test faults pass (10 of 35
+without), in about a clean run's time, with no false alarms on the control. The plan and the decisions still open are in
 [experiments/phase2/README.md](experiments/phase2/README.md).
 
 The agents are built on Pi Agent (TypeScript), runs go through [Harbor](https://www.tbench.ai/docs), and the model
@@ -40,14 +41,15 @@ The result tables are in git, so they can be checked without rerunning anything:
 | `experiments/phase1/results/failing-tests.md` | Each hidden test a fault broke or left unfixed. |
 | `experiments/phase1/results/memorization-probe.json` | The check that the model cannot write the fixes from memory. |
 | `experiments/phase2/results/` | The same three tables (`summary.md`, `runs.csv`, `failing-tests.md`) for the Phase 2 faults, `tool-false-pass-all` and `edit-corrupt-hidden`, beside the Phase 1 controls they are paired with; and `recovery-bounds.md` and `recovery-runs.csv`, the recovery policies scored on every fault (step 1 of the plan); and `watchdog-replay.md` and `.csv`, when the watchdog would have caught each fault (step 2). |
+| `experiments/phase2/results-watchdog/` | The same three tables for the watchdog's live runs (step 3), beside the same conditions without it. |
 | `experiments/swe-bench-baseline/results/` | The clean baseline and pilot, one row per run. |
 
 **The saved runs** are in `data/`: `phase1-runs.tar.xz` (all 399 Phase 1 runs), `phase2-runs.tar.xz` (the 38
-Phase 2 fault runs, plus the superseded runs and the code they ran with; see `jobs/phase2/CODE.md`) and `swe-baseline-runs.tar.xz` (the 60 clean baseline runs). Each run has its grade, every conversation, tool call and stage diff, and the provenance
+Phase 2 fault runs, plus the superseded runs and the code they ran with; see `jobs/phase2/CODE.md`), `phase2-watchdog-runs.tar.xz` (the 95 live watchdog runs; see `jobs/phase2-watchdog/CODE.md`) and `swe-baseline-runs.tar.xz` (the 60 clean baseline runs). Each run has its grade, every conversation, tool call and stage diff, and the provenance
 graph. Only the whole-filesystem manifests are left out, to keep them small. No GPU is needed to use them:
 
 ```bash
-mkdir -p jobs && for f in phase1-runs phase2-runs swe-baseline-runs; do tar -C jobs -xJf data/$f.tar.xz; done
+mkdir -p jobs && for f in phase1-runs phase2-runs phase2-watchdog-runs swe-baseline-runs; do tar -C jobs -xJf data/$f.tar.xz; done
 cd experiments/phase1 && python3 -I analyze.py /tmp/check ../../jobs/phase1/*   # rebuilds results/ exactly
 ```
 
