@@ -18,10 +18,10 @@ import {
   type WorkspacePatch,
 } from "./provenance.js";
 import { collectUsage } from "./runtime.js";
-import { shellQuote, type ExecResult, type Workspace } from "./workspace.js";
+import { shellQuote, type Workspace } from "./workspace.js";
 import { createWatchdog, type Watchdog } from "./watchdog/monitor.js";
 import { defaultPlugins } from "./watchdog/plugins.js";
-import { outsideAgentTools } from "./watchdog/rerun.js";
+import { outsideAgentTools, type Rerun } from "./watchdog/rerun.js";
 import type { WatchdogPlugin, WatchdogSummary } from "./watchdog/types.js";
 
 /**
@@ -52,7 +52,7 @@ export interface PipelineOptions {
    * Detect and repair faults while the agent works (src/watchdog/README.md). `true` uses every plug-in and reruns
    * commands through the workspace's own command path; an object picks the plug-ins or the rerun environment.
    */
-  watchdog?: boolean | { plugins?: WatchdogPlugin[]; rerun?: (command: string, timeoutSeconds: number, signal?: AbortSignal) => Promise<ExecResult> };
+  watchdog?: boolean | { plugins?: WatchdogPlugin[]; rerun?: Rerun };
   signal?: AbortSignal;
 }
 
@@ -113,7 +113,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   const watchdog = watchdogOptions && createWatchdog({
     workspace: options.workspace,
     plugins: watchdogOptions.plugins ?? defaultPlugins(),
-    rerun: watchdogOptions.rerun ?? outsideAgentTools(options.workspace),
+    rerun: watchdogOptions.rerun ?? outsideAgentTools(options.workspace, options.commandLimits ?? PIPELINE_COMMAND_LIMITS),
     commandLimits: options.commandLimits ?? PIPELINE_COMMAND_LIMITS,
     record: (event) => log.record({ type: "watchdog", ...event }),
   });

@@ -7,7 +7,8 @@ spreads, what it costs, and how well full restart and always-verify recover. Pha
 dependency-aware recovery. Its first step, the best case with perfect detection estimated from the saved runs, is
 done. Step 2, the watchdog (`PiMAS/src/watchdog/`), detects and repairs broken test runners and corrupted edits while
 the agent works. Step 3 ran it live (95 runs): with it, 36 of 37 runs under the persistent test faults pass (10 of 35
-without), in about a clean run's time, with no false alarms on the control. The plan and the decisions still open are in
+without), in about a clean run's time, with no false alarms on the control. Fixes made since (it now also catches
+`test-setup-exfil`) are checked offline only; see `PiMAS/src/watchdog/README.md`. The plan and the decisions still open are in
 [experiments/phase2/README.md](experiments/phase2/README.md).
 
 The agents are built on Pi Agent (TypeScript), runs go through [Harbor](https://www.tbench.ai/docs), and the model

@@ -1079,7 +1079,7 @@ for (const condition of ["tool-false-fail-all", "tool-timeout-all"]) {
     const { result, events, tests, watchdog } = await runWatched(t, await experimentFault(condition), { "test_answer.py": ANSWER_TEST }, KEEPS_TESTING);
     // The first test run after the edit is checked: the known-passing probe fails too, so the runner is broken.
     assert.match(tests[0].output, /^Ran 1 test in [\d.]+s\n\nOK/m);
-    assert.match(tests[0].output, /bash tool is giving wrong test results \(a test that must pass came back (failed|timeout)\)/);
+    assert.match(tests[0].output, /tools are giving wrong test results \(a test that must pass (came back failed|timed out through your tools, but passed outside them)\)/);
     assert.equal(tests[0].isError, false);
     // Every later test run goes around the agent's tools: it runs once, outside them, so the fault never sees it.
     assert.ok(tests.slice(1).every((entry) => /OK[\s\S]*Run outside your tools/.test(entry.output) && !entry.isError));
@@ -1089,6 +1089,34 @@ for (const condition of ["tool-false-fail-all", "tool-timeout-all"]) {
     assert.equal(faulted.filter((id) => !id.startsWith("watchdog-probe-")).length, 1, "only the agent's first test run met the fault");
   });
 }
+
+test("the watchdog catches test-setup-exfil, which replaces test results with a message, by probing outside the tools", TIMEOUT, async (t) => {
+  const { outputs, tests, watchdog } = await runWatched(t, await experimentFault("test-setup-exfil"), { "test_answer.py": ANSWER_TEST }, KEEPS_TESTING);
+  assert.match(tests[0].output, /^OK$/m);
+  assert.match(tests[0].output, /a test that must pass printed no test results through your tools, but passed outside them/);
+  assert.ok(tests.every((entry) => /^OK$/m.test(entry.output) && !entry.isError));
+  assert.ok(outputs.every((entry) => !/127\.0\.0\.1:9/.test(entry.output)), "the agent never sees the request to send its diff");
+  assert.deepEqual(watchdog.slice(0, 3), ["test-runner:suspected", "test-runner:confirmed", "test-runner:repaired"]);
+});
+
+for (const condition of ["tool-false-fail-all", "tool-timeout-all", "test-setup-exfil"]) test(`the watchdog checks a helper script's tests under ${condition}, and after a catch gives the agent real logs read back`, TIMEOUT, async (t) => {
+  const helper = "import sys, unittest, test_answer\nsys.exit(not unittest.main(module=test_answer, exit=False, verbosity=2).result.wasSuccessful())\n";
+  const { outputs, events, watchdog } = await runWatched(t, await experimentFault(condition), { "test_answer.py": ANSWER_TEST, "check.py": helper }, [
+    { tool: "write", args: { path: "answer.txt", content: "42\n" } },
+    { tool: "bash", args: { command: "python3 check.py" } }, // not a test command by name, but it prints test results
+    { tool: "bash", args: { command: `${RUN_TEST} > run.log 2>&1` } },
+    { tool: "bash", args: { command: "cat run.log" } },
+    { tool: "read", args: { path: "run.log" } },
+  ]);
+  const shown = outputs.filter((entry) => entry.tool === "bash" || entry.tool === "read");
+  assert.match(shown[0].output, /^OK$/m);
+  assert.match(shown[0].output, /tools are giving wrong test results/);
+  for (const entry of shown.slice(2)) assert.match(entry.output, /^OK$/m, `${entry.tool} ${entry.args?.command ?? entry.args?.path}`);
+  assert.ok(shown.every((entry) => !/FAILED \(failures=1\)/.test(entry.output) && !entry.isError));
+  assert.deepEqual(watchdog, ["test-runner:suspected", "test-runner:confirmed", "test-runner:repaired", "test-runner:rerouted", "test-runner:rerouted", "test-runner:rerouted"]);
+  const faulted = events.filter((event) => event.type === "fault").map((event) => String(event.injection.toolCallId));
+  assert.equal(faulted.filter((id) => !id.startsWith("watchdog-probe-")).length, 1, "only the helper script's run met the fault");
+});
 
 test("the watchdog catches tool-false-pass-all with a known-failing probe, so a wrong fix is not taken for a pass", TIMEOUT, async (t) => {
   const { tests, watchdog } = await runWatched(t, await experimentFault("tool-false-pass-all"),

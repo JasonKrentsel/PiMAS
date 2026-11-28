@@ -147,40 +147,55 @@ The watchdog (`PiMAS/src/watchdog/`, documented in its README) wraps the agent's
 which detects a kind of fault, confirms it with independent evidence, and repairs it. Two plug-ins cover the
 faults worth targeting:
 
-- **`test-runner`** (broken tools: `tool-timeout*`, `tool-false-fail*`, `tool-false-pass-all`). On the first test
-  result after each edit, it runs a probe through the agent's own bash tool: a test that must pass after a failure
-  or timeout, or one that must fail after a pass. If the probe's answer is wrong, the runner is broken: the agent's
-  command is rerun outside its tools (through the pipeline's own command path), the agent gets the real result,
-  and later test commands are rerouted the same way.
+- **`test-runner`** (broken tools: `tool-timeout*`, `tool-false-fail*`, `tool-false-pass-all`, `test-setup-exfil`).
+  On the first passing and the first failing test result after each edit (and the first failed bash command), it
+  runs a probe through the agent's own bash tool: a test that must pass after a failure or timeout, or one that must fail after a pass. If the probe's
+  answer is wrong, or it answers rightly only when run outside the agent's tools, the tools are broken: the agent
+  gets the real result (its command rerun outside its tools, through a fresh bash tool of the pipeline's own), and
+  every later bash command and file read goes around its tools the same way.
 - **`edit-check`** (corrupted edits: `edit-corrupt*`, including the hidden slip). After each edit, it reads the file
-  directly (not through the agent's tools) and, if it does not hold what the agent wrote, restores the intended
-  content and tells the agent.
+  directly (not through the agent's tools) and, if it holds anything but the intended content (the old file with the
+  edit applied by Pi's own edit tool, in memory), restores that content and tells the agent.
 
 **Offline tests.** `PiMAS/tests/watchdog.test.ts` tests the plug-ins and the loop without a model.
-`PiMAS/tests/pipeline.test.ts` runs the whole pipeline with a scripted agent under four faults, loaded from their
+`PiMAS/tests/pipeline.test.ts` runs the whole pipeline with a scripted agent under five faults, loaded from their
 condition files, and with no fault. Under each fault the agent gets the real test result or a restored file;
 without one, it sees exactly what it would without the watchdog.
 
-**Replay on the saved runs** (`replay-watchdog.mts`, `results/watchdog-replay.md`). Each saved run's tool calls go
-through the `test-runner` detector. Probe answers are simulated: true for a healthy runner, faulted when a
-test-results fault would be active at that moment. Replay stops at the first catch, since from there the agent
-would see something different.
+**Replay on the saved runs** (`replay-watchdog.mts`, `results/watchdog-replay.md`, current code). Each saved run's
+tool calls go through the `test-runner` detector. Probe answers are simulated: true for a healthy runner, and, when
+a test-results fault would be active at that moment, answered as that fault answers the agent (a false failure or
+pass, a timeout, or the fault's message in place of the results); outside the agent's tools, always true. Replay
+stops at the first catch, since from there the agent would see something different. To rerun it:
+
+```bash
+cd PiMAS && node --import tsx ../experiments/phase2/replay-watchdog.mts ../experiments/phase2/results \
+  ../jobs/phase1/* ../jobs/phase2/tool-false-pass-all ../jobs/phase2/edit-corrupt-hidden
+```
 
 | Condition | Runs | Caught | Probes per run | Minutes from fault to catch | Run minutes after the catch |
 |---|---|---|---|---|---|
-| `tool-timeout-all` | 18 | 18/18 | 1.4 | 0.0 | 93.2 |
-| `tool-false-fail-all` | 18 | 16/18 | 2.1 | 0.0 | 71.9 |
-| `tool-false-pass-all` | 10 | 10/10 | 1.5 | −0.2 | 28.3 |
-| Controls (`control-rp`, `-r`, `-full`) | 57 | 0/57 | 2.1–3.3 | – | – |
-| Every other fault | 227 | 1/227 | 1.7–2.5 | – | – |
+| `tool-timeout-all` | 18 | 18/18 | 1.6 | −0.5 | 95.0 |
+| `tool-false-fail-all` | 18 | 18/18 | 1.6 | −1.1 | 93.9 |
+| `tool-false-pass-all` | 10 | 10/10 | 2.6 | −0.2 | 28.3 |
+| `test-setup-exfil` | 18 | 18/18 | 1.5 | 0.0 | 30.5 |
+| Controls (`control-rp`, `-r`, `-full`) | 57 | 0/57 | 3.5–5.6 | – | – |
+| Every other fault | 209 | 19/209 | 2.7–5.5 | – | – |
 
 Medians; *Caught* and the times count runs where the fault fired. A negative time means the probe caught the fault
-before it touched any of the agent's own test results.
+before it touched any of the agent's own test results: a probe after a failed command (any bash command that fails
+is checked once per edit) met the fault first.
 
-- **It catches the persistent test faults at the first faulty result**, in 44 of 46 runs. The two misses ran their
-  tests in a way the detector does not recognize (for example output sent to a log file).
-- **It never fires on a clean run.** Controls and the other faults cost about 2 probes per run, a few seconds.
-  The one catch among the other faults is `tool-false-fail`: the probe itself met the single false failure.
+- **It catches the persistent test faults at or before the first faulty result**, in all 64 runs where one fired.
+- **It never fires on a clean run.** Controls and the other faults cost about 4 probes per run, a few seconds.
+  The 19 catches among the other faults are all real: the single-shot `tool-false-fail` (11 of 19) and
+  `tool-timeout` (8 of 18), whose one faulty result the probe met. Live, the probe would use up such a fault before
+  the agent's test does, so the agent would never see it.
+- **Earlier versions missed some** (this table before the fixes, in git history): `test-setup-exfil` in all 18 runs,
+  because a probe whose results the fault replaced with a message was taken as inconclusive, and 2 of 18
+  `tool-false-fail-all` runs, which showed their results through a helper script or a log. The replay itself also
+  answered probes truly under `test-setup-exfil`, so it could not have shown a fix. Every fix since the live runs is
+  listed in `PiMAS/src/watchdog/README.md` ("Changes since the live runs").
 - **What was left for the live runs (step 3, below):** whether the agent, given the real results, finishes in about the
   control's time. The "after the catch" column is the most that could be saved: up to 93 minutes per run under
   `tool-timeout-all`.
@@ -189,8 +204,9 @@ before it touched any of the agent's own test results.
   `tool-false-pass-all` in none. Agents rerun tests without editing, and often reproduce a bug with a script, not a
   test.
 
-`edit-check` is not replayed: the saved runs do not keep file contents. Its end-to-end test covers the hidden slip;
-on a clean run it can only misfire if a file ends up different from what the agent wrote.
+`edit-check` is not replayed: the saved runs do not keep file contents. Its end-to-end test covers the hidden slip,
+and its unit tests cover CRLF files, byte-order marks and several edits at once; on a clean run it can only misfire
+if a file ends up different from what Pi's edit tool would have written.
 
 **What came from the `fault_recovery` branch (Sean).** The shared test-output recognition (`src/test-results.ts`),
 the known-passing probe command, and the plan of a probe followed by a fresh environment. Left out:
@@ -204,6 +220,10 @@ It has not been run against Docker yet. His branch also commits the whole `node_
 a `.DS_Store`, so it should not be merged as it is.
 
 ## Step 3: the watchdog, live
+
+These results describe the watchdog as of commit 7638ad1. It has been fixed since, in ways checked offline only
+(the replay above, and the tests): the list is in `PiMAS/src/watchdog/README.md`, "Changes since the live runs".
+Numbers for the current code need the same runs again, plus `test-setup-exfil`, which the watchdog now targets.
 
 Each condition was run once per task (19 tasks) with the watchdog on (`run.sh <condition> watchdog`), on Qwen3.8-27B,
 8 at a time per GPU, and compared with the same conditions run without it. The tables are in `results-watchdog/`
@@ -233,9 +253,13 @@ Runs where the fault fired: passes, then mean agent minutes per run, beside step
   6.2 minutes, the same as the control.
 - **It gets within a few minutes of the best case,** and beats a restart on every fault but `edit-corrupt-hidden`,
   where a restart is cheap because the agent loses only one edit.
-- **It catches each fault at its first faulty result**: one probe per run (*Checked* 1 in `results-watchdog/summary.md`),
-  and in every caught test-fault run the probe itself met the fault. `edit-check` restored every hidden slip, so no
-  view ever had to hide it (*Hits/run* 1, against 3.5 without the watchdog).
+- **It catches the test faults at their first faulty result in 53 of the 55 caught runs**, with one probe (*Checked*
+  1 in `results-watchdog/summary.md`), which itself met the fault. In the other two, faulty results reached the agent
+  first: 12 in pytest-5262 under `tool-false-fail-all`, where a pytest 4 failure ("1 failed in 0.00 seconds") was
+  read as a pass, and 1 in django-16255 under `tool-false-pass-all`, whose result was cut by `| tail -5`. After a
+  catch, 3 more reached agents in 57 runs, all logs read back. None of these cost a task, and all are fixed since
+  (below). `edit-check` restored every hidden slip, so no view ever had to hide it (*Hits/run* 1, against 3.5
+  without the watchdog).
 - **It stays quiet on clean runs.** `control-rp` with the watchdog: 0 of 19 runs flagged, 2 probes per run, the same
   pass rate and mean minutes. Its median minutes and tokens are slightly higher (7.4 against 6.2 minutes); the agent
   sees exactly the same results as without the watchdog, so this is run-to-run variation.
@@ -252,9 +276,9 @@ Runs where the fault fired: passes, then mean agent minutes per run, beside step
   runner is broken even in runs where no real test failed for the fault to hide.
 
 **Limits of these runs.** One run per task. The simulated timeout returns at once, so under a real hang the first
-faulty test run and its probe would each cost their full timeout before the watchdog acts. Reruns use the same
-workspace through the pipeline's own command path, which is enough for faults in the tool layer (all of this
-project's) but not for a broken environment.
+faulty test run would cost its full timeout, and the probe its 10 seconds, before the watchdog acts. Reruns use the
+same workspace, through a fresh bash tool of the pipeline's own, which is enough for faults in the tool layer (all
+of this project's) but not for a broken environment.
 
 ## Faults that beat the agents' own checks
 

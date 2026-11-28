@@ -20,8 +20,8 @@ export function testResults(text: string): boolean {
   return UNITTEST_RAN.test(plain) || UNITTEST_INLINE.test(plain) || PYTEST_SUMMARY.test(plain) || SYMPY_SUMMARY.test(plain) || TEST_PASSED.test(plain) || TEST_FAILED.test(plain);
 }
 
-// A failing result in unittest, pytest or sympy form.
-const SHOWS_FAILURE = /(?:^|\n)(?:FAILED \((?:failures|errors)=|\S+::\S+ (?:FAILED|ERROR)\b|(?:FAILED|ERROR) \S+::\S+|.* \.\.\. (?:FAIL|ERROR)\b|.*\b\d+ (?:failed|errors?)\b.* in [\d.]+ ?s\b|.*tests finished:.*\b\d+ (?:failed|exceptions?)\b)/m;
+// A failing result in unittest, pytest or sympy form. pytest before 5.0 ends its summary "in 0.04 seconds".
+const SHOWS_FAILURE = /(?:^|\n)(?:FAILED \((?:failures|errors)=|\S+::\S+ (?:FAILED|ERROR)\b|(?:FAILED|ERROR) \S+::\S+|.* \.\.\. (?:FAIL|ERROR)\b|.*\b\d+ (?:failed|errors?)\b.* in [\d.]+ ?s(?:econds)?\b|.*tests finished:.*\b\d+ (?:failed|exceptions?)\b)/m;
 
 export function showsFailure(text: string): boolean {
   return SHOWS_FAILURE.test(text.replace(ANSI, ""));

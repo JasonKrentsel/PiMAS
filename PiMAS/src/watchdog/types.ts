@@ -1,4 +1,4 @@
-import type { ExecResult, Workspace } from "../workspace.js";
+import type { Workspace } from "../workspace.js";
 
 /**
  * The watchdog's plug-in interface. A plug-in handles one kind of fault in four steps, each run by the monitor
@@ -37,6 +37,8 @@ export interface ToolCall {
 export interface ToolOutcome {
   output: string;
   isError: boolean;
+  /** Every part the tool returned, when it returned more than text (an image); `output` holds its text. */
+  content?: unknown[];
 }
 
 export interface Suspicion {
@@ -72,8 +74,12 @@ export interface WatchdogTools {
    * Null when the current stage has no bash tool.
    */
   agentBash: ((command: string, timeoutSeconds: number) => Promise<ToolOutcome>) | null;
-  /** Run a command outside the agent's tools (see rerun.ts). Stops when the agent's call is aborted. */
-  rerun(command: string, timeoutSeconds: number): Promise<ExecResult>;
+  /** Run a command outside the agent's tools (see rerun.ts), giving what the agent's bash tool would have shown.
+   *  Stops when the agent's call is aborted. */
+  rerun(command: string, timeoutSeconds: number): Promise<ToolOutcome>;
+  /** Read a file as the agent's read tool would, with the same arguments, but through a fresh read tool on the
+   *  workspace rather than the agent's (which a fault may wrap). */
+  readOutside(args: Record<string, unknown>): Promise<ToolOutcome>;
   /** The timeout the agent's bash tool would use for a call: its default if none is asked for, and never above its cap. */
   timeoutFor(requestedSeconds: unknown): number;
 }

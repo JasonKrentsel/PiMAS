@@ -1,12 +1,15 @@
+import path from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { CommandLimits } from "../execution-tools.js";
-import type { ExecResult, Workspace } from "../workspace.js";
+import type { Workspace } from "../workspace.js";
+import { readOutsideAgentTools, type Rerun } from "./rerun.js";
 import type { ToolCall, ToolOutcome, WatchdogEvent, WatchdogPlugin, WatchdogSummary, WatchdogTools } from "./types.js";
 
 export interface WatchdogOptions {
   workspace: Workspace;
   plugins: WatchdogPlugin[];
-  rerun: (command: string, timeoutSeconds: number, signal?: AbortSignal) => Promise<ExecResult>;
+  /** Where commands are rerun outside the agent's tools (rerun.ts). */
+  rerun: Rerun;
   /** The agent's bash timeouts (default and cap), so a rerun gets the timeout the agent's command would. */
   commandLimits: CommandLimits;
   record: (event: WatchdogEvent) => void | Promise<void>;
@@ -22,6 +25,22 @@ export type Watchdog = ReturnType<typeof createWatchdog>;
 export function createWatchdog(options: WatchdogOptions) {
   const summary: WatchdogSummary = { plugins: options.plugins.map((plugin) => plugin.name), suspected: 0, confirmed: 0, repaired: 0 };
   let probes = 0;
+  const readOutside = readOutsideAgentTools(options.workspace);
+
+  // Pi runs the calls of one turn in parallel unless one is bash, so two edits to the same file can overlap. Calls
+  // that change the same file run one at a time here, so a plug-in's copy of a file before a call is the file that
+  // call changed (Pi applies them one at a time anyway).
+  const queues = new Map<string, Promise<unknown>>();
+  const changedFile = (tool: string, args: Record<string, unknown>) =>
+    (tool === "edit" || tool === "write") && typeof args.path === "string"
+      ? path.posix.resolve(options.workspace.cwd, args.path.replace(/^@/, "")) : null;
+  async function oneAtATime<T>(file: string | null, run: () => Promise<T>): Promise<T> {
+    if (file === null) return run();
+    const current = (queues.get(file) ?? Promise.resolve()).catch(() => {}).then(run);
+    const settled = current.catch(() => {});
+    queues.set(file, settled);
+    try { return await current; } finally { if (queues.get(file) === settled) queues.delete(file); }
+  }
 
   /** Wrap one stage's tools. Call once per tool; the stage's bash tool is kept for probes. */
   function forStage(stageId: string, currentStep: () => string | null) {
@@ -43,13 +62,21 @@ export function createWatchdog(options: WatchdogOptions) {
       if (tool.name === "bash") bash = tool;
       return {
         ...tool,
-        async execute(toolCallId, params, signal, onUpdate, ctx) {
+        execute(toolCallId, params, signal, onUpdate, ctx) {
+          const args = (params ?? {}) as Record<string, unknown>;
+          return oneAtATime(changedFile(tool.name, args), () => watched(args, toolCallId, params, signal, onUpdate, ctx));
+        },
+      } as ToolDefinition;
+
+      /** One call, watched: before, instead, the tool itself, then detect, confirm and repair. */
+      async function watched(args: Record<string, unknown>, ...[toolCallId, params, signal, onUpdate, ctx]: Parameters<ToolDefinition["execute"]>) {
           lastContext = ctx;
-          const call: ToolCall = { stageId, stepId: currentStep(), toolCallId, tool: tool.name, args: (params ?? {}) as Record<string, unknown> };
+          const call: ToolCall = { stageId, stepId: currentStep(), toolCallId, tool: tool.name, args };
           const tools: WatchdogTools = {
             workspace: options.workspace,
             agentBash: bash ? agentBash : null,
             rerun: (command, timeoutSeconds) => options.rerun(command, timeoutSeconds, signal),
+            readOutside: (args) => readOutside(args, signal),
             timeoutFor: (requested) => Math.min(
               typeof requested === "number" ? requested : options.commandLimits.defaultSeconds, options.commandLimits.maxSeconds),
           };
@@ -100,8 +127,7 @@ export function createWatchdog(options: WatchdogOptions) {
             return result!;
           }
           return toolResult(outcome, notes);
-        },
-      } as ToolDefinition;
+      }
     };
   }
 
@@ -110,8 +136,10 @@ export function createWatchdog(options: WatchdogOptions) {
 
 /** A tool result holding an outcome with the watchdog's notes after it. */
 function toolResult(outcome: ToolOutcome, notes: string[]) {
+  const note = { type: "text" as const, text: `\n\n${notes.join("\n\n")}` };
   return {
-    content: [{ type: "text" as const, text: `${outcome.output}\n\n${notes.join("\n\n")}` }],
+    // An outcome with more than text (an image read outside the agent's tools) keeps all its parts.
+    content: outcome.content ? [...outcome.content, note] : [{ type: "text" as const, text: `${outcome.output}${note.text}` }],
     details: undefined,
     isError: outcome.isError,
   } as Awaited<ReturnType<ToolDefinition["execute"]>>;

@@ -8,8 +8,10 @@
  *
  * The detector sees each saved call as the agent saw it. A probe cannot be rerun on a saved run, so its answer is
  * simulated: a healthy runner answers it truly, and a tool fault that would be active at that moment (armed by
- * an edit, and persistent or not yet used) answers it the way it answers the agent. Replay stops at the first
- * confirmation, because from there the watchdog changes what the agent sees and the saved run no longer applies.
+ * an edit, and persistent or not yet used) answers it the way it answers the agent: a false failure or pass, a
+ * timeout, or the fault's text in place of the results. Outside the agent's tools the probe is always answered
+ * truly. Replay stops at the first confirmation, because from there the watchdog changes what the agent sees and
+ * the saved run no longer applies.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -47,23 +49,35 @@ async function replay(trial: string, condition: string): Promise<Row> {
   let armed = false;
   let now = "";
   let probes = 0;
-  // A probe's answer: the truth, unless a test-results fault is active right now.
+  const truth = (command: string): ToolOutcome => command === FAILING_PROBE ? { output: FAIL, isError: true } : { output: PASS, isError: false };
+  // A probe's answer through the agent's tool: the truth, unless a test-results fault is active right now.
   const probe = async (command: string): Promise<ToolOutcome> => {
     probes++;
     const mustFail = command === FAILING_PROBE;
     const used = injections.some((at) => at <= now);
     const active = toolFault && armed && (toolFault.target.persistent || !used);
-    if (active && toolFault.action === "timeout") return { output: TIMEOUT, isError: true };
-    if (active && toolFault.action === "fail" && !mustFail) return { output: FAIL, isError: true };
-    if (active && toolFault.action === "pass" && mustFail) return { output: PASS, isError: false };
-    return mustFail ? { output: FAIL, isError: true } : { output: PASS, isError: false };
+    if (!active) return truth(command);
+    switch (toolFault.action) {
+      case "timeout": return { output: TIMEOUT, isError: true };
+      case "fail": return mustFail ? truth(command) : { output: FAIL, isError: true };
+      case "pass": return mustFail ? { output: PASS, isError: false } : truth(command);
+      case "replace": return { output: toolFault.text, isError: toolFault.isError === true };
+      case "append": return { output: `${truth(command).output}\n${toolFault.text}`, isError: truth(command).isError };
+      default: throw new Error(`The replay does not model how a ${toolFault.action} fault answers a probe`);
+    }
   };
-  const tools: WatchdogTools = { workspace: localWorkspace("/"), agentBash: probe, rerun: async () => ({ exitCode: 0, stdout: "", stderr: "" }), defaultTimeoutSeconds: 600 };
+  const tools: WatchdogTools = {
+    workspace: localWorkspace("/"),
+    agentBash: probe,
+    rerun: async (command) => truth(command), // outside the agent's tools, only probes are rerun before a catch
+    readOutside: async () => { throw new Error("The replay stops at the first catch, before any read is repaired"); },
+    timeoutFor: () => 600,
+  };
 
   let confirmedAt: number | null = null;
   for (const call of jsonl(path.join(state, "tool-calls.jsonl")) as Call[]) {
     now = call.endedAt;
-    if (call.tool === "edit" || call.tool === "write") armed = true;
+    if ((call.tool === "edit" || call.tool === "write") && !call.isError) armed = true; // as the fault arms (faults.ts)
     const call_ = { stageId: call.stageId, stepId: null, toolCallId: call.toolCallId, tool: call.tool, args: call.args ?? {} };
     const suspicion = await plugin.detect(call_, { output: call.output ?? "", isError: call.isError }, tools);
     if (!suspicion) continue;
