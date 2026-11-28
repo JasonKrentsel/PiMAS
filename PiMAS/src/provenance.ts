@@ -94,6 +94,8 @@ export type ProvenanceEvent =
   | { type: "step_files"; stageId: string; segment: StepFileChanges }
   | { type: "fault"; injection: FaultInjection }
   | ({ type: "watchdog" } & WatchdogEvent)
+  /** The workspace patch again, after the hold queue ran approved calls at the end of the run (patches/finish.diff). */
+  | { type: "finish_patch"; workspacePatch: StageArtifact["workspacePatch"] }
   | { type: "stage_end"; artifact: StageArtifact }
   | { type: "run_end"; status: string; durationMs: number };
 

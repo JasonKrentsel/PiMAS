@@ -20,6 +20,7 @@ import {
 import { collectUsage } from "./runtime.js";
 import { shellQuote, type Workspace } from "./workspace.js";
 import { createWatchdog, type Watchdog } from "./watchdog/monitor.js";
+import { REVIEW_SYSTEM_PROMPT, type HoldReviewer } from "./watchdog/hold-queue.js";
 import { defaultPlugins } from "./watchdog/plugins.js";
 import { outsideAgentTools, type Rerun } from "./watchdog/rerun.js";
 import type { WatchdogPlugin, WatchdogSummary } from "./watchdog/types.js";
@@ -112,7 +113,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   const watchdogOptions = options.watchdog === true ? {} : options.watchdog || null;
   const watchdog = watchdogOptions && createWatchdog({
     workspace: options.workspace,
-    plugins: watchdogOptions.plugins ?? defaultPlugins(),
+    plugins: watchdogOptions.plugins ?? defaultPlugins({ review: holdReviewer(options), request: options.request }),
     rerun: watchdogOptions.rerun ?? outsideAgentTools(options.workspace, options.commandLimits ?? PIPELINE_COMMAND_LIMITS),
     commandLimits: options.commandLimits ?? PIPELINE_COMMAND_LIMITS,
     record: (event) => log.record({ type: "watchdog", ...event }),
@@ -203,6 +204,15 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   } finally {
     await log.flush();
   }
+  if (watchdog) {
+    const released = watchdog.summary.released;
+    await watchdog.finish();
+    // Calls the hold queue let run after the last stage can change files; the patch is saved again so they show.
+    if (watchdog.summary.released > released && tracker) {
+      await log.record({ type: "finish_patch", workspacePatch: await saveWorkspacePatch(options, "finish") });
+    }
+    await log.flush();
+  }
 
   const interrupted = options.signal?.aborted ?? false;
   const done = (artifact: StageArtifact) => artifact.status === "submitted" || artifact.status === "replayed";
@@ -214,6 +224,48 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     usage: sumUsage(artifacts.map((artifact) => artifact.usage)),
     fault: fault ? { spec: fault, injection: injections[0] ?? null, injections: injections.length } : null,
     ...(watchdog ? { watchdog: watchdog.summary } : {}),
+  };
+}
+
+/** Time allowed for the hold queue's review, so it stays well inside a run's time limit. */
+const HOLD_REVIEW_SECONDS = 180;
+
+/**
+ * The hold queue's review at the end of the run: one model call on the reviewer role's model, with no tools and the
+ * hold queue's own system prompt, saved in sessions/ like a stage's. Its tokens are in sessions/ (and so in Harbor's
+ * totals), not in the stage artifacts' usage.
+ */
+function holdReviewer(options: PipelineOptions): HoldReviewer {
+  return async (prompt) => {
+    if (options.signal?.aborted) return { text: "", usage: null, error: "the run was aborted" };
+    const session = await createRoleSession({
+      cwd: options.workspace.cwd,
+      modelsFile: options.modelsFile,
+      role: "reviewer",
+      roles: options.roles,
+      sessionManager: SessionManager.create(options.workspace.cwd, path.join(options.directory, "sessions")),
+      toolset: "none",
+      workspace: options.workspace,
+      systemPrompt: REVIEW_SYSTEM_PROMPT,
+    });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; void session.abort(); }, HOLD_REVIEW_SECONDS * 1000);
+    const onAbort = () => void session.abort();
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      let thrown: string | undefined;
+      try { await session.prompt(prompt); } catch (error) { thrown = error instanceof Error ? error.message : String(error); }
+      const last = session.messages.at(-1);
+      const error = timedOut ? `the review took over ${HOLD_REVIEW_SECONDS} seconds`
+        : options.signal?.aborted ? "the run was aborted"
+        : thrown !== undefined ? `review failed: ${thrown}`
+        : last?.role === "assistant" && last.stopReason !== "stop" ? `the model stopped: ${last.errorMessage ?? last.stopReason}` : undefined;
+      return { text: error ? "" : session.getLastAssistantText() ?? "", usage: collectUsage(session), ...(error ? { error } : {}) };
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
+      session.dispose();
+    }
   };
 }
 

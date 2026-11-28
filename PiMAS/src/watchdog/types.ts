@@ -22,6 +22,10 @@ export interface WatchdogPlugin {
   detect(call: ToolCall, outcome: ToolOutcome, tools: WatchdogTools): Promise<Suspicion | null> | Suspicion | null;
   confirm(suspicion: Suspicion, call: ToolCall, tools: WatchdogTools): Promise<Evidence>;
   repair(evidence: Evidence, call: ToolCall, outcome: ToolOutcome, tools: WatchdogTools): Promise<Repair>;
+  /** optional: the result the agent was given for a call, after every plug-in's repair or `instead`. */
+  seen?(call: ToolCall, outcome: ToolOutcome): void;
+  /** optional: act once when the run ends, after the last stage (e.g. review held calls). */
+  finish?(tools: WatchdogTools): Promise<FinishEvent[]>;
 }
 
 /** One tool call by the agent. */
@@ -63,6 +67,18 @@ export interface Repair {
 /** A call handled without the agent's tool: why (recorded in provenance), and the note and result the agent gets. */
 export interface Instead extends Required<Repair> {
   reason: string;
+  /** The call was held for review at the end of the run (`held`), not rerouted. */
+  held?: boolean;
+}
+
+/** One step a plug-in took when the run ended, recorded like the other watchdog events. */
+export interface FinishEvent {
+  toolCallId: string;
+  phase: "reviewed" | "released" | "dropped";
+  reason: string;
+  /** A model call's token usage, for a step that made one. */
+  usage?: unknown;
+  durationMs?: number;
 }
 
 /** What plug-ins may use to gather evidence and repair. */
@@ -89,9 +105,14 @@ export interface WatchdogEvent {
   stageId: string;
   toolCallId: string;
   plugin: string;
-  /** `rerouted`: a call handled by a plug-in's `instead`, without the agent's tool. */
-  phase: "suspected" | "dismissed" | "confirmed" | "repaired" | "rerouted";
+  /**
+   * `rerouted`: a call handled by a plug-in's `instead`, without the agent's tool. `held`: a call that did not run,
+   * kept for review. `reviewed`, `released`, `dropped`: steps taken when the run ended (FinishEvent).
+   */
+  phase: "suspected" | "dismissed" | "confirmed" | "repaired" | "rerouted" | "held" | FinishEvent["phase"];
   reason: string;
+  usage?: unknown;
+  durationMs?: number;
 }
 
 export interface WatchdogSummary {
@@ -100,4 +121,6 @@ export interface WatchdogSummary {
   suspected: number;
   confirmed: number;
   repaired: number;
+  held: number;
+  released: number;
 }

@@ -302,7 +302,7 @@ test("the watchdog loop appends repair notes and replacements to what the agent 
   const repaired = await bash.execute("c2", { command: "check" }, undefined, undefined, undefined as never);
   assert.deepEqual([repaired.content, (repaired as { isError?: boolean }).isError], [[{ type: "text", text: "real\n\n[watchdog] fixed" }], false]);
   assert.deepEqual(events.map((event) => event.phase), ["suspected", "confirmed", "repaired"]);
-  assert.deepEqual(watchdog.summary, { plugins: ["always"], suspected: 1, confirmed: 1, repaired: 1 });
+  assert.deepEqual(watchdog.summary, { plugins: ["always"], suspected: 1, confirmed: 1, repaired: 1, held: 0, released: 0 });
 });
 
 test("the watchdog loop runs edits to the same file one at a time, so parallel edits are not taken for corruption", async (t) => {

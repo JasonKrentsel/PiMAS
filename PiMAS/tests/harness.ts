@@ -151,9 +151,15 @@ export async function experimentFault(condition: string) {
   return JSON.parse(await readFile(file, "utf8")).fault;
 }
 
-/** Run the pipeline with the watchdog on, the given files in the workspace and an executor making the given calls. */
-export async function runWatched(t: TestContext, fault: unknown, files: Record<string, string>, calls: { tool: string; args: Record<string, unknown> }[]) {
-  const app = await fixture(t, executorCalling(calls));
+/**
+ * Run the pipeline with the watchdog on, the given files in the workspace and an executor making the given calls.
+ * `review` is the model's answer to the hold queue's review at the end of the run (the one request with no tools).
+ */
+export async function runWatched(t: TestContext, fault: unknown, files: Record<string, string>, calls: { tool: string; args: Record<string, unknown> }[],
+  options: { review?: string } = {}) {
+  const executor = executorCalling(calls);
+  const app = await fixture(t, (stage, turn, request) =>
+    stage === "other" && options.review !== undefined ? { text: options.review } : executor(stage, turn, request));
   await writeFile(path.join(app.workspaceDir, "input.txt"), "41\n");
   for (const [name, content] of Object.entries(files)) await writeFile(path.join(app.workspaceDir, name), content);
   const result = await runPipeline({

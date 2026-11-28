@@ -23,7 +23,9 @@ export type Watchdog = ReturnType<typeof createWatchdog>;
  * confirm and repair. Notes from repairs are appended to the result the agent gets.
  */
 export function createWatchdog(options: WatchdogOptions) {
-  const summary: WatchdogSummary = { plugins: options.plugins.map((plugin) => plugin.name), suspected: 0, confirmed: 0, repaired: 0 };
+  const summary: WatchdogSummary = {
+    plugins: options.plugins.map((plugin) => plugin.name), suspected: 0, confirmed: 0, repaired: 0, held: 0, released: 0,
+  };
   let probes = 0;
   const readOutside = readOutsideAgentTools(options.workspace);
 
@@ -41,6 +43,9 @@ export function createWatchdog(options: WatchdogOptions) {
     queues.set(file, settled);
     try { return await current; } finally { if (queues.get(file) === settled) queues.delete(file); }
   }
+
+  /** Tell each plug-in what the agent was given for a call. */
+  const given = (call: ToolCall, outcome: ToolOutcome) => { for (const plugin of options.plugins) plugin.seen?.(call, outcome); };
 
   /** Wrap one stage's tools. Call once per tool; the stage's bash tool is kept for probes. */
   function forStage(stageId: string, currentStep: () => string | null) {
@@ -86,8 +91,10 @@ export function createWatchdog(options: WatchdogOptions) {
           for (const plugin of options.plugins) {
             const handled = await plugin.instead?.(call, tools);
             if (!handled) continue;
-            summary.repaired++;
-            await options.record({ stageId, toolCallId, plugin: plugin.name, phase: "rerouted", reason: handled.reason });
+            if (handled.held) summary.held++;
+            else summary.repaired++;
+            await options.record({ stageId, toolCallId, plugin: plugin.name, phase: handled.held ? "held" : "rerouted", reason: handled.reason });
+            given(call, { ...handled.replacement, output: `${handled.replacement.output}\n\n${handled.note}` });
             return toolResult(handled.replacement, [handled.note]);
           }
 
@@ -121,6 +128,7 @@ export function createWatchdog(options: WatchdogOptions) {
             if (repair.replacement) outcome = repair.replacement;
           }
 
+          given(call, notes.length ? { ...outcome, output: `${outcome.output}\n\n${notes.join("\n\n")}` } : outcome);
           // Nothing to add: hand back exactly what the tool returned.
           if (!notes.length) {
             if (thrown !== undefined) throw thrown;
@@ -131,7 +139,25 @@ export function createWatchdog(options: WatchdogOptions) {
     };
   }
 
-  return { forStage, summary };
+  /** When the run ends: each plug-in's last step (the hold queue's review), recorded as stage "finish". */
+  async function finish() {
+    const tools: WatchdogTools = {
+      workspace: options.workspace,
+      agentBash: null,
+      rerun: (command, timeoutSeconds) => options.rerun(command, timeoutSeconds),
+      readOutside: (args) => readOutside(args),
+      timeoutFor: (requested) => Math.min(
+        typeof requested === "number" ? requested : options.commandLimits.defaultSeconds, options.commandLimits.maxSeconds),
+    };
+    for (const plugin of options.plugins) {
+      for (const event of await plugin.finish?.(tools) ?? []) {
+        if (event.phase === "released") summary.released++;
+        await options.record({ stageId: "finish", plugin: plugin.name, ...event });
+      }
+    }
+  }
+
+  return { forStage, finish, summary };
 }
 
 /** A tool result holding an outcome with the watchdog's notes after it. */

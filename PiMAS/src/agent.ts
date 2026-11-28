@@ -41,13 +41,15 @@ interface RoleSessionOptions {
   commandLimits?: CommandLimits;
   /** Applied to each native tool, e.g. to inject a controlled fault into one call. */
   wrapTool?: (tool: ToolDefinition) => ToolDefinition;
+  /** Used instead of the role's system prompt file, keeping the role's model and settings. */
+  systemPrompt?: string;
 }
 
 /** The caller owns prompting, local history, and abort/dispose of each Pi session. */
 export async function createRoleSession(options: RoleSessionOptions): Promise<AgentSession> {
   const profile = options.roles[options.role];
   if (!profile) throw new Error(`No ${options.role} profile is configured`);
-  const systemPrompt = (await readFile(profile.systemPrompt, "utf8")).trim();
+  const systemPrompt = (options.systemPrompt ?? await readFile(profile.systemPrompt, "utf8")).trim();
   if (!systemPrompt) throw new Error(`System prompt is empty: ${profile.systemPrompt}`);
 
   // Pi treats a missing models file as optional; this application requires it.

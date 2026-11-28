@@ -928,7 +928,7 @@ for (const condition of ["tool-false-fail-all", "tool-timeout-all"]) {
     // Every later test run goes around the agent's tools: it runs once, outside them, so the fault never sees it.
     assert.ok(tests.slice(1).every((entry) => /OK[\s\S]*Run outside your tools/.test(entry.output) && !entry.isError));
     assert.deepEqual(watchdog, ["test-runner:suspected", "test-runner:confirmed", "test-runner:repaired", ...tests.slice(1).map(() => "test-runner:rerouted")]);
-    assert.deepEqual(result.watchdog, { plugins: ["test-runner", "edit-check"], suspected: 1, confirmed: 1, repaired: 4 });
+    assert.deepEqual(result.watchdog, { plugins: ["hold-queue", "test-runner", "edit-check"], suspected: 1, confirmed: 1, repaired: 4, held: 0, released: 0 });
     const faulted = events.filter((event) => event.type === "fault").map((event) => String(event.injection.toolCallId));
     assert.equal(faulted.filter((id) => !id.startsWith("watchdog-probe-")).length, 1, "only the agent's first test run met the fault");
   });
@@ -999,5 +999,5 @@ test("without a fault the watchdog only probes, and changes nothing the agent se
   assert.ok(outputs.every((entry) => !/\[watchdog\]/.test(entry.output)));
   // The first result before and after the edit is each checked with a probe, which a healthy runner answers correctly.
   assert.deepEqual(watchdog, ["test-runner:suspected", "test-runner:dismissed", "test-runner:suspected", "test-runner:dismissed"]);
-  assert.deepEqual(result.watchdog, { plugins: ["test-runner", "edit-check"], suspected: 2, confirmed: 0, repaired: 0 });
+  assert.deepEqual(result.watchdog, { plugins: ["hold-queue", "test-runner", "edit-check"], suspected: 2, confirmed: 0, repaired: 0, held: 0, released: 0 });
 });
