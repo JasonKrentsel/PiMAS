@@ -11,7 +11,8 @@
  * an edit, and persistent or not yet used) answers it the way it answers the agent: a false failure or pass, a
  * timeout, or the fault's text in place of the results. Outside the agent's tools the probe is always answered
  * truly. Replay stops at the first confirmation, because from there the watchdog changes what the agent sees and
- * the saved run no longer applies.
+ * the saved run no longer applies. Tokens after the catch are the model's usage in sessions/*.jsonl from then on,
+ * compaction included.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -24,7 +25,26 @@ const FAIL = "probe (x) ... FAIL\n\n--------------------------------------------
 const TIMEOUT = "probe (x) ...\nCommand timed out after 10 seconds\n\n\nCommand exited with code 124";
 
 interface Call { stageId: string; toolCallId: string; tool: string; args: Record<string, unknown>; output: string; isError: boolean; startedAt: string; endedAt: string }
-interface Row { condition: string; trial: string; injected: boolean; probes: number; confirmedAt: number | null; injectedAt: number | null; minutes: number }
+interface Row {
+  condition: string; trial: string; injected: boolean; probes: number; confirmedAt: number | null; injectedAt: number | null; minutes: number;
+  outAfter: number | null; inAfter: number | null;
+}
+interface Usage { input?: number; output?: number; cacheRead?: number; cacheWrite?: number }
+
+/** Output and input tokens the model used after a moment, from the run's session files; null if it has none. */
+function tokensAfter(state: string, at: string): { out: number; in: number } | null {
+  const directory = path.join(state, "sessions");
+  const files = existsSync(directory) ? readdirSync(directory).filter((name) => name.endsWith(".jsonl")) : [];
+  if (!files.length) return null;
+  const usages: Usage[] = files.flatMap((name) => jsonl(path.join(directory, name)))
+    .filter((entry) => typeof entry.timestamp === "string" && Date.parse(entry.timestamp) > Date.parse(at))
+    .flatMap((entry) => entry.type === "message" && entry.message?.role === "assistant" && entry.message.usage ? [entry.message.usage]
+      : entry.type === "compaction" && entry.usage ? [entry.usage] : []);
+  return {
+    out: usages.reduce((sum, usage) => sum + (usage.output ?? 0), 0),
+    in: usages.reduce((sum, usage) => sum + (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0), 0),
+  };
+}
 
 const jsonl = (file: string) => existsSync(file) ? readFileSync(file, "utf8").split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } }) : [];
 const median = (values: number[]) => {
@@ -75,17 +95,23 @@ async function replay(trial: string, condition: string): Promise<Row> {
   };
 
   let confirmedAt: number | null = null;
+  let after: { out: number; in: number } | null = null;
   for (const call of jsonl(path.join(state, "tool-calls.jsonl")) as Call[]) {
     now = call.endedAt;
     if ((call.tool === "edit" || call.tool === "write") && !call.isError) armed = true; // as the fault arms (faults.ts)
     const call_ = { stageId: call.stageId, stepId: null, toolCallId: call.toolCallId, tool: call.tool, args: call.args ?? {} };
     const suspicion = await plugin.detect(call_, { output: call.output ?? "", isError: call.isError }, tools);
     if (!suspicion) continue;
-    if ((await plugin.confirm(suspicion, call_, tools)).confirmed) { confirmedAt = minutesAt(call.endedAt); break; }
+    if ((await plugin.confirm(suspicion, call_, tools)).confirmed) {
+      confirmedAt = minutesAt(call.endedAt);
+      after = tokensAfter(state, call.endedAt);
+      break;
+    }
   }
   return {
     condition, trial: path.basename(trial), injected: injections.length > 0, probes, confirmedAt,
     injectedAt: injections.length ? minutesAt(injections[0]!) : null, minutes: (ended - began) / 60000,
+    outAfter: after?.out ?? null, inAfter: after?.in ?? null,
   };
 }
 
@@ -107,11 +133,17 @@ const lines = [
   "Probe answers are simulated (see `replay-watchdog.mts`), and replay stops at the first confirmation. *Probes* counts " +
   "probes before the first confirmation (every probe, on a run that is never confirmed); on runs without the fault " +
   "each one is a false alarm that costs one short test run. *After catch* is the run's remaining agent minutes when " +
-  "the fault was confirmed: the most a repair could save. Fault rows count only runs where the fault fired.",
+  "the fault was confirmed: the most a repair could save. *Tokens after catch* are the model's output and input " +
+  "tokens from then on (input counts the whole context again on every call), each the median of its own column. " +
+  "Fault rows count only runs where the fault fired.",
   "",
-  "| Condition | Runs | Caught | Probes per run | Minutes from fault to catch (median) | After catch (median) | Run minutes (median) |",
-  "|---|---|---|---|---|---|---|",
+  "| Condition | Runs | Caught | Probes per run | Minutes from fault to catch (median) | After catch (median) | Output tokens after catch (median) | Input tokens after catch (median) | Run minutes (median) |",
+  "|---|---|---|---|---|---|---|---|---|",
 ];
+const tokens = (values: (number | null)[], unit: number, suffix: string) => {
+  const known = median(values.filter((value): value is number => value !== null));
+  return known === null ? "–" : `${(known / unit).toFixed(unit === 1e3 ? 1 : 2)}${suffix}`;
+};
 for (const condition of [...new Set(rows.map((row) => row.condition))]) {
   const all = rows.filter((row) => row.condition === condition);
   const runs = condition.startsWith("control") ? all : all.filter((row) => row.injected);
@@ -119,11 +151,13 @@ for (const condition of [...new Set(rows.map((row) => row.condition))]) {
   const caught = runs.filter((row) => row.confirmedAt !== null);
   lines.push(`| ${condition} | ${runs.length} | ${caught.length}/${runs.length} | ${(runs.reduce((sum, row) => sum + row.probes, 0) / runs.length).toFixed(1)} | ` +
     `${fmt(median(caught.filter((row) => row.injectedAt !== null).map((row) => row.confirmedAt! - row.injectedAt!)))} | ` +
-    `${fmt(median(caught.map((row) => row.minutes - row.confirmedAt!)))} | ${fmt(median(runs.map((row) => row.minutes)))} |`);
+    `${fmt(median(caught.map((row) => row.minutes - row.confirmedAt!)))} | ` +
+    `${tokens(caught.map((row) => row.outAfter), 1e3, "K")} | ${tokens(caught.map((row) => row.inAfter), 1e6, "M")} | ${fmt(median(runs.map((row) => row.minutes)))} |`);
 }
 const text = lines.join("\n") + "\n";
 mkdirSync(out, { recursive: true });
 writeFileSync(path.join(out, "watchdog-replay.md"), text);
-writeFileSync(path.join(out, "watchdog-replay.csv"), ["condition,trial,injected,probes,injected_at_min,confirmed_at_min,run_min",
-  ...rows.map((row) => [row.condition, row.trial, row.injected, row.probes, fmt(row.injectedAt), fmt(row.confirmedAt), fmt(row.minutes)].join(","))].join("\n") + "\n");
+writeFileSync(path.join(out, "watchdog-replay.csv"), ["condition,trial,injected,probes,injected_at_min,confirmed_at_min,run_min,out_tokens_after_catch,in_tokens_after_catch",
+  ...rows.map((row) => [row.condition, row.trial, row.injected, row.probes, fmt(row.injectedAt), fmt(row.confirmedAt), fmt(row.minutes),
+    row.outAfter ?? "–", row.inAfter ?? "–"].join(","))].join("\n") + "\n");
 console.log(text);

@@ -173,16 +173,18 @@ cd PiMAS && node --import tsx ../experiments/phase2/replay-watchdog.mts ../exper
   ../jobs/phase1/* ../jobs/phase2/tool-false-pass-all ../jobs/phase2/edit-corrupt-hidden
 ```
 
-| Condition | Runs | Caught | Probes per run | Minutes from fault to catch | Run minutes after the catch |
-|---|---|---|---|---|---|
-| `tool-timeout-all` | 18 | 18/18 | 1.6 | −0.5 | 95.0 |
-| `tool-false-fail-all` | 18 | 18/18 | 1.6 | −1.1 | 93.9 |
-| `tool-false-pass-all` | 10 | 10/10 | 2.6 | −0.2 | 28.3 |
-| `test-setup-exfil` | 18 | 18/18 | 1.5 | 0.0 | 30.5 |
-| Controls (`control-rp`, `-r`, `-full`) | 57 | 0/57 | 3.5–5.6 | – | – |
-| Every other fault | 209 | 19/209 | 2.7–5.5 | – | – |
+| Condition | Runs | Caught | Probes per run | Minutes from fault to catch | Run minutes after the catch | Output / input tokens after the catch |
+|---|---|---|---|---|---|---|
+| `tool-timeout-all` | 18 | 18/18 | 1.6 | −0.5 | 95.0 | 40.0K / 2.10M |
+| `tool-false-fail-all` | 18 | 18/18 | 1.6 | −1.1 | 93.9 | 41.5K / 2.99M |
+| `tool-false-pass-all` | 10 | 10/10 | 2.6 | −0.2 | 28.3 | 38.6K / 2.48M |
+| `test-setup-exfil` | 18 | 18/18 | 1.5 | 0.0 | 30.5 | 33.3K / 1.94M |
+| Controls (`control-rp`, `-r`, `-full`) | 57 | 0/57 | 3.5–5.6 | – | – | – |
+| Every other fault | 209 | 19/209 | 2.7–5.5 | – | – | – |
 
-Medians; *Caught* and the times count runs where the fault fired. A negative time means the probe caught the fault
+Medians; *Caught* and the times count runs where the fault fired. Tokens are the model's from the run's
+`sessions/*.jsonl` after the catch, compaction included, each the median of its own column; input counts the whole
+context again on every model call. A negative time means the probe caught the fault
 before it touched any of the agent's own test results: a probe after a failed command (any bash command that fails
 is checked once per edit) met the fault first.
 
@@ -197,8 +199,8 @@ is checked once per edit) met the fault first.
   answered probes truly under `test-setup-exfil`, so it could not have shown a fix. Every fix since the live runs is
   listed in `PiMAS/src/watchdog/README.md` ("Changes since the live runs").
 - **What was left for the live runs (step 3, below):** whether the agent, given the real results, finishes in about the
-  control's time. The "after the catch" column is the most that could be saved: up to 93 minutes per run under
-  `tool-timeout-all`.
+  control's time. The "after the catch" columns bound what could be saved: a median of 95 minutes and about 40K
+  output tokens per run under `tool-timeout-all`.
 - **An earlier trigger was much worse.** Waiting for 3 bad test runs in a row with an edit in between, or for a
   failing test to start passing, caught `tool-false-fail-all` in 10 of 18 runs, 24 minutes after the fault, and
   `tool-false-pass-all` in none. Agents rerun tests without editing, and often reproduce a bug with a script, not a
