@@ -11,9 +11,10 @@ import { FAILING_PROBE, PASSING_PROBE, classify, testRunnerPlugin } from "../src
 import type { ToolCall, ToolOutcome, WatchdogEvent, WatchdogTools } from "../src/watchdog/types.js";
 import { showsFailure } from "../src/test-results.js";
 import { createWorkspaceTools, localWorkspace } from "../src/workspace.js";
+import { ANSWER_TEST, RUN_TEST, TIMEOUT as E2E, experimentFault, runWatched } from "./harness.js";
 
-// Unit tests for the watchdog's plug-ins and loop, without a model. End-to-end runs under the Phase 1 faults are in
-// pipeline.test.ts ("the watchdog ...").
+// Unit tests for the watchdog's plug-ins and loop without a model, then end-to-end runs of saved test logs with a
+// scripted executor. More end-to-end runs under the Phase 1 faults are in pipeline.test.ts ("the watchdog ...").
 
 const PASS = "test_x (t.T) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nOK";
 const FAIL = "test_x (t.T) ... FAIL\n\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nFAILED (failures=1)";
@@ -370,4 +371,48 @@ test("the watchdog loop runs a call a plug-in handles instead without the agent'
   assert.equal(ran, 1);
   assert.deepEqual(events.map((event) => [event.phase, event.reason]), [["rerouted", "known broken"]]);
   assert.equal(watchdog.summary.repaired, 1);
+});
+
+test("the watchdog catches a false failure first seen in a saved log, and shows the real log", E2E, async (t) => {
+  const { result, outputs } = await runWatched(t, await experimentFault("tool-false-fail-all"), { "test_answer.py": ANSWER_TEST }, [
+    { tool: "write", args: { path: "answer.txt", content: "42\n" } },
+    { tool: "bash", args: { command: `${RUN_TEST} > test.log 2>&1; echo saved` } },
+    { tool: "read", args: { path: "test.log" } },
+  ]);
+  const read = outputs.find((entry) => entry.tool === "read" && entry.args.path === "test.log");
+  assert.match(read.output, /^OK$/m);
+  assert.doesNotMatch(read.output, /FAILED/);
+  assert.match(read.output, /the file's real content, read by the pipeline outside your tools/, "caught and repaired on the read itself");
+  assert.equal(result.watchdog?.confirmed, 1);
+});
+
+test("without a fault, reading saved test logs never confirms anything or changes what the agent sees", E2E, async (t) => {
+  // A helper script writes the log, so the read of it is the first test result after the edit.
+  const { app, result, outputs, events } = await runWatched(t, null, { "test_answer.py": ANSWER_TEST, "check.sh": `${RUN_TEST}\n` }, [
+    { tool: "write", args: { path: "answer.txt", content: "42\n" } },
+    { tool: "bash", args: { command: "bash check.sh > test.log 2>&1; echo saved" } },
+    { tool: "read", args: { path: "test.log" } },
+    { tool: "write", args: { path: "answer.txt", content: "42\n" } },
+    { tool: "bash", args: { command: "cat test.log" } },
+  ]);
+  const checked = events.filter((event) => event.type === "watchdog").map((event) => [event.phase, outputs.find((entry) => entry.toolCallId === event.toolCallId)?.tool]);
+  assert.deepEqual(checked, [["suspected", "read"], ["dismissed", "read"], ["suspected", "bash"], ["dismissed", "bash"]], "both views of the log were checked");
+  assert.equal(result.watchdog?.confirmed, 0);
+  const log = await readFile(path.join(app.workspaceDir, "test.log"), "utf8");
+  const views = outputs.filter((entry) => entry.args.path === "test.log" || entry.args.command === "cat test.log");
+  assert.deepEqual(views.map((entry) => entry.output.trim()), [log.trim(), log.trim()], "the agent saw the log as it is");
+});
+
+test("after a catch, a big saved log is cut as the agent's own view would be", E2E, async (t) => {
+  const { outputs } = await runWatched(t, await experimentFault("test-setup-exfil"), { "test_answer.py": ANSWER_TEST }, [
+    { tool: "write", args: { path: "answer.txt", content: "42\n" } },
+    { tool: "bash", args: { command: RUN_TEST } },
+    { tool: "bash", args: { command: `seq 200000 > big.log; ${RUN_TEST} >> big.log 2>&1` } },
+    { tool: "bash", args: { command: "cat big.log" } },
+  ]);
+  const view = outputs.find((entry) => entry.args.command === "cat big.log");
+  assert.match(view.output, /\[Showing lines \d+-\d+ of \d+/, "the output was cut");
+  assert.ok(view.output.length < 100_000, `${view.output.length} characters`);
+  assert.match(view.output, /^OK$/m);
+  assert.doesNotMatch(view.output, /127\.0\.0\.1:9/);
 });
